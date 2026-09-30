@@ -405,7 +405,7 @@ static void enter(lv_obj_t *root)
     s_timer = lv_timer_create(frame, FRAME_MS, NULL);
 }
 
-static void on_exit(void)
+static void on_leave(void)
 {
     if (s_timer) {
         lv_timer_delete(s_timer);
@@ -444,6 +444,6 @@ const os_app_t app_skate = {
     .symbol = LV_SYMBOL_PLAY,
     .accent = COL_ORANGE,
     .on_enter = enter,
-    .on_exit = on_exit,
+    .on_exit = on_leave,
     .on_key = on_key,
 };
