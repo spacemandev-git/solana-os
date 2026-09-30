@@ -1,0 +1,12 @@
+menu "Solana OS"
+
+    config SOLANA_OS_SERVER_URL
+        string "Badge server origin"
+        default ""
+        help
+            Origin of the badge server (server/API.md), e.g. "https://example.org"
+            or "http://192.168.1.10:3000", without a trailing slash. The console
+            command "server <url>" overrides it (stored in NVS "cloud/server").
+            Empty means the badge does not talk to a server until one is set.
+
+endmenu

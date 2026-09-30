@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.5"
+  espressif/esp_lcd_ili9341: "^2.0.1"
+  espressif/led_strip: "^3.0.0"
+  espressif/esp_lvgl_port: "^2.6.0"
+  lvgl/lvgl: "^9.2.0"

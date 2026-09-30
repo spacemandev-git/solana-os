@@ -1,0 +1,454 @@
+// Badge <-> server link, see os_cloud.h and server/API.md.
+//
+// One low-priority task owns the conversation: it waits for Wi-Fi and a
+// configured server, says hello, and then repeats every `poll` seconds (or
+// with backoff after errors). Everything it learns goes into s_info under a
+// mutex; the My Badge app and the console only read snapshots of it.
+//
+// Portable: only os_http, os_wifi_state(), NVS, the MAC, the app version,
+// FreeRTOS tasks and cJSON. The emulator compiles this file unchanged and can
+// override the identity below with -D flags.
+
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "esp_app_desc.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_timer.h"
+#include "nvs.h"
+#include "cJSON.h"
+#include "os.h"
+#include "os_cloud.h"
+#include "os_http.h"
+#include "os_wifi.h"
+
+static const char *TAG = "os_cloud";
+
+#ifndef CONFIG_SOLANA_OS_SERVER_URL
+#define CONFIG_SOLANA_OS_SERVER_URL ""
+#endif
+#ifndef OS_CLOUD_MODEL
+#define OS_CLOUD_MODEL      "bp26"
+#endif
+#ifndef OS_CLOUD_HW_PREFIX
+#define OS_CLOUD_HW_PREFIX  ""          // the emulator uses "emu-"
+#endif
+
+#define NVS_NS          "cloud"
+#define RESP_CAP        1024            // API.md: responses stay under 1 KB
+#define POLL_DEFAULT_S  60
+#define BACKOFF_MIN_S   15              // API.md: never faster than 15 s on errors
+#define BACKOFF_MAX_S   120             // ...and at most the last `poll` once we have one
+#define ERRORS_TO_SHOW  3               // transient failures keep the last good screen
+#define WIFI_CHECK_MS   1000
+#define DEFER_S         10              // retry delay when the heap can't hold a request
+
+extern const os_app_t app_wifi, app_badge;
+
+static SemaphoreHandle_t s_lock;
+static TaskHandle_t s_task;
+static os_cloud_info_t s_info;
+static char s_secret[96];
+static int64_t s_next_ms = -1;          // next hello, -1 = not scheduled
+static int s_poll_s;                    // last `poll` from the server, 0 = none yet
+
+static int64_t now_ms(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static void lock(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+}
+
+static void unlock(void)
+{
+    xSemaphoreGive(s_lock);
+}
+
+// ---------------------------------------------------------------------------
+// NVS "cloud": server, id, secret
+
+static void nvs_load(const char *key, char *out, size_t n)
+{
+    nvs_handle_t h;
+    out[0] = 0;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = n;
+        if (nvs_get_str(h, key, out, &len) != ESP_OK) {
+            out[0] = 0;
+        }
+        nvs_close(h);
+    }
+}
+
+static void nvs_save(const char *key, const char *val)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGE(TAG, "nvs open failed");
+        return;
+    }
+    if (val && val[0]) {
+        nvs_set_str(h, key, val);
+    } else {
+        nvs_erase_key(h, key);
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// ---------------------------------------------------------------------------
+// Hello
+
+typedef struct {
+    int status;                     // HTTP status, 0 = no response
+    bool ok, claimed;
+    bool deferred;                  // not sent: too little heap right now (e.g. a big app is open)
+    char id[16], secret[96], claim_url[160], owner[64];
+    int poll;
+    const char *error;
+} hello_t;
+
+// Owner label: "@username", else the display name (ASCII only: the fonts
+// have no other glyphs), else a shortened wallet.
+static void owner_label(const cJSON *o, char *out, size_t n)
+{
+    const char *user = cJSON_GetStringValue(cJSON_GetObjectItem(o, "username"));
+    const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(o, "name"));
+    const char *wallet = cJSON_GetStringValue(cJSON_GetObjectItem(o, "wallet"));
+    out[0] = 0;
+    if (user && user[0]) {
+        snprintf(out, n, "@%s", user);
+        return;
+    }
+    if (name) {
+        size_t j = 0;
+        for (const char *p = name; *p && j + 1 < n; p++) {
+            if (*p >= 0x20 && *p < 0x7F) {
+                out[j++] = *p;
+            }
+        }
+        while (j && out[j - 1] == ' ') {
+            j--;
+        }
+        out[j] = 0;
+        if (out[0] && out[0] != ' ') {
+            return;
+        }
+    }
+    if (wallet && strlen(wallet) > 10) {
+        snprintf(out, n, "%.4s..%s", wallet, wallet + strlen(wallet) - 4);
+    } else {
+        strlcpy(out, wallet ? wallet : "someone", n);
+    }
+}
+
+static void parse(const char *body, hello_t *r)
+{
+    cJSON *j = cJSON_Parse(body);
+    if (!j) {
+        r->error = "Bad response from the server";
+        return;
+    }
+    if (r->status != 200) {
+        switch (r->status / 100) {
+        case 4:  r->error = "The server refused the badge"; break;
+        case 5:  r->error = "The server had an error"; break;
+        default: r->error = "Unexpected server response"; break;
+        }
+        const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(j, "error"));
+        ESP_LOGW(TAG, "hello: HTTP %d %s", r->status, msg ? msg : "");
+        cJSON_Delete(j);
+        return;
+    }
+    const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(j, "id"));
+    const char *secret = cJSON_GetStringValue(cJSON_GetObjectItem(j, "secret"));
+    const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(j, "claimUrl"));
+    const cJSON *owner = cJSON_GetObjectItem(j, "owner");
+    const cJSON *poll = cJSON_GetObjectItem(j, "poll");
+    r->claimed = cJSON_IsTrue(cJSON_GetObjectItem(j, "claimed"));
+    r->poll = cJSON_IsNumber(poll) ? (int)poll->valuedouble : POLL_DEFAULT_S;
+    if (!id || !id[0] || strlen(id) >= sizeof(r->id)) {
+        r->error = "Bad response from the server";
+    } else if (!r->claimed && (!url || strlen(url) >= sizeof(r->claim_url))) {
+        r->error = "No claim link from the server";
+    } else {
+        strlcpy(r->id, id, sizeof(r->id));
+        if (secret && strlen(secret) < sizeof(r->secret)) {
+            strlcpy(r->secret, secret, sizeof(r->secret));
+        }
+        if (url && !r->claimed) {
+            strlcpy(r->claim_url, url, sizeof(r->claim_url));
+        }
+        if (r->claimed) {
+            owner_label(cJSON_IsObject(owner) ? owner : NULL, r->owner, sizeof(r->owner));
+        }
+        r->ok = true;
+    }
+    cJSON_Delete(j);
+}
+
+static void hello(const char *server, const char *secret, hello_t *r)
+{
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char url[128], body[128];
+    snprintf(url, sizeof(url), "%s/api/badge/hello", server);
+    snprintf(body, sizeof(body), "{\"hw\":\"%s%02x%02x%02x%02x%02x%02x\",\"fw\":\"%s\",\"model\":\"%s\"}",
+             OS_CLOUD_HW_PREFIX, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             esp_app_get_description()->version, OS_CLOUD_MODEL);
+
+    char *resp = malloc(RESP_CAP);
+    if (!resp) {
+        r->deferred = true;
+        return;
+    }
+    esp_err_t err = os_http_request("POST", url, secret[0] ? secret : NULL, body, resp, RESP_CAP, &r->status);
+    if (err == ESP_ERR_NO_MEM) {
+        r->deferred = true;
+    } else if (err != ESP_OK) {
+        r->error = "Can't reach the server";
+    } else {
+        parse(resp, r);
+    }
+    free(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Task
+
+// Apply a hello result. Returns the delay until the next one, in seconds.
+static int apply(const char *server, const hello_t *r, int *errors, int *backoff)
+{
+    os_cloud_state_t prev;
+    bool opened = false;
+    static bool s_auto_opened;          // auto-open My Badge once per boot
+    char toast[80] = "", id[sizeof(s_info.id)];
+
+    if (r->deferred) {
+        return DEFER_S;                 // not the server's fault; keep the current state
+    }
+    lock();
+    if (strcmp(server, s_info.server)) {
+        unlock();                       // the server changed while we asked the old one
+        return 0;
+    }
+    prev = s_info.state;
+    s_info.http_status = r->status;
+    if (r->ok) {
+        *errors = 0;
+        *backoff = BACKOFF_MIN_S;
+        if (strcmp(s_info.id, r->id)) {
+            strlcpy(s_info.id, r->id, sizeof(s_info.id));
+            nvs_save("id", r->id);
+        }
+        if (r->secret[0] && strcmp(s_secret, r->secret)) {
+            strlcpy(s_secret, r->secret, sizeof(s_secret));
+            nvs_save("secret", r->secret);
+            ESP_LOGI(TAG, "new secret stored");
+        }
+        strlcpy(s_info.claim_url, r->claim_url, sizeof(s_info.claim_url));
+        strlcpy(s_info.owner, r->owner, sizeof(s_info.owner));
+        s_info.state = r->claimed ? OS_CLOUD_CLAIMED : OS_CLOUD_UNCLAIMED;
+        s_info.error = NULL;
+    } else {
+        s_info.error = r->error;
+        // Keep the QR / owner on screen through a blip; the data is still valid.
+        bool good = prev == OS_CLOUD_UNCLAIMED || prev == OS_CLOUD_CLAIMED;
+        if (!good || ++*errors >= ERRORS_TO_SHOW) {
+            s_info.state = OS_CLOUD_ERROR;
+        }
+    }
+    os_cloud_state_t now = s_info.state;
+    strlcpy(id, s_info.id, sizeof(id));
+    if (now == OS_CLOUD_UNCLAIMED && prev != OS_CLOUD_UNCLAIMED && !s_auto_opened) {
+        s_auto_opened = true;
+        const os_app_t *cur = os_current();
+        opened = cur == &os_launcher || cur == &app_wifi;
+    }
+    if (now == OS_CLOUD_CLAIMED && prev == OS_CLOUD_UNCLAIMED) {
+        snprintf(toast, sizeof(toast), "Linked to %s", s_info.owner);
+    }
+    unlock();
+
+    if (now != prev) {
+        ESP_LOGI(TAG, "%s id=%s %s", now == OS_CLOUD_CLAIMED ? "claimed" : now == OS_CLOUD_UNCLAIMED ? "unclaimed" : "error",
+                 id, now == OS_CLOUD_ERROR ? r->error : "");
+    }
+    if (opened) {
+        os_launch(&app_badge);
+    }
+    if (toast[0]) {
+        os_toast("%s", toast);
+    }
+
+    if (r->ok) {
+        s_poll_s = r->poll < 5 ? 5 : r->poll > 3600 ? 3600 : r->poll;
+        return s_poll_s;
+    }
+    int cap = s_poll_s > BACKOFF_MIN_S ? s_poll_s : s_poll_s ? BACKOFF_MIN_S : BACKOFF_MAX_S;
+    int d = *backoff < cap ? *backoff : cap;
+    *backoff = *backoff * 2;
+    if (*backoff > cap) {
+        *backoff = cap;
+    }
+    return d;
+}
+
+static void set_offline(void)
+{
+    lock();
+    s_info.state = OS_CLOUD_OFFLINE;
+    s_info.error = NULL;
+    s_info.busy = false;
+    s_next_ms = -1;
+    unlock();
+}
+
+static void cloud_task(void *arg)
+{
+    bool online = false;
+    int errors = 0, backoff = BACKOFF_MIN_S;
+    char server[sizeof(s_info.server)], secret[sizeof(s_secret)], prev_server[sizeof(s_info.server)] = "";
+    hello_t *r = malloc(sizeof(hello_t));
+    assert(r);
+
+    for (;;) {
+        lock();
+        strlcpy(server, s_info.server, sizeof(server));
+        strlcpy(secret, s_secret, sizeof(secret));
+        int64_t next = s_next_ms;
+        unlock();
+        if (strcmp(server, prev_server)) {
+            strlcpy(prev_server, server, sizeof(prev_server));
+            s_poll_s = 0;
+            errors = 0;
+            backoff = BACKOFF_MIN_S;
+        }
+
+        if (!server[0] || os_wifi_state() != OS_WIFI_CONNECTED) {
+            if (online) {
+                online = false;
+                set_offline();
+            }
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WIFI_CHECK_MS));
+            continue;
+        }
+        if (!online) {
+            // Fresh connection: hello right away.
+            online = true;
+            errors = 0;
+            backoff = BACKOFF_MIN_S;
+            next = 0;
+            lock();
+            if (s_info.state == OS_CLOUD_OFFLINE || s_info.state == OS_CLOUD_ERROR) {
+                s_info.state = OS_CLOUD_CONNECTING;
+            }
+            unlock();
+        }
+
+        int64_t now = now_ms();
+        if (next >= 0 && now < next) {
+            // Sleep until due, a refresh, or the next Wi-Fi check.
+            int64_t wait = next - now;
+            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait > WIFI_CHECK_MS ? WIFI_CHECK_MS : wait))) {
+                lock();
+                s_next_ms = 0;
+                unlock();
+            }
+            continue;
+        }
+
+        lock();
+        s_info.busy = true;
+        if (s_info.state == OS_CLOUD_OFFLINE) {
+            s_info.state = OS_CLOUD_CONNECTING;
+        }
+        unlock();
+        memset(r, 0, sizeof(*r));
+        hello(server, secret, r);
+        int delay_s = apply(server, r, &errors, &backoff);
+        lock();
+        s_info.busy = false;
+        // A server change or wifi drop during the request resets the schedule.
+        if (!strcmp(server, s_info.server)) {
+            s_next_ms = now_ms() + delay_s * 1000LL;
+        }
+        unlock();
+        ESP_LOGD(TAG, "next hello in %d s, stack left %u", delay_s, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API
+
+void os_cloud_init(void)
+{
+    s_lock = xSemaphoreCreateMutex();
+    nvs_load("server", s_info.server, sizeof(s_info.server));
+    if (!s_info.server[0]) {
+        strlcpy(s_info.server, CONFIG_SOLANA_OS_SERVER_URL, sizeof(s_info.server));
+    }
+    nvs_load("id", s_info.id, sizeof(s_info.id));
+    nvs_load("secret", s_secret, sizeof(s_secret));
+    s_info.state = OS_CLOUD_OFFLINE;
+    ESP_LOGI(TAG, "server '%s', badge id '%s'%s", s_info.server, s_info.id, s_secret[0] ? ", has secret" : "");
+    xTaskCreate(cloud_task, "cloud", 5120, NULL, 2, &s_task);    // HTTPS hello peaks at ~3.4 KB
+}
+
+void os_cloud_get_info(os_cloud_info_t *out)
+{
+    lock();
+    *out = s_info;
+    out->retry_s = s_next_ms < 0 ? -1 : s_next_ms <= now_ms() ? 0 : (int)((s_next_ms - now_ms() + 999) / 1000);
+    unlock();
+}
+
+void os_cloud_refresh(void)
+{
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+void os_cloud_set_server(const char *url)
+{
+    char clean[sizeof(s_info.server)];
+    strlcpy(clean, url ? url : "", sizeof(clean));
+    size_t n = strlen(clean);
+    while (n && clean[n - 1] == '/') {
+        clean[--n] = 0;
+    }
+    bool clear = !clean[0];
+    if (clear) {
+        strlcpy(clean, CONFIG_SOLANA_OS_SERVER_URL, sizeof(clean));     // back to the build default
+    }
+    lock();
+    bool changed = strcmp(clean, s_info.server) != 0;
+    if (changed) {
+        // The ID and secret belong to the old server.
+        strlcpy(s_info.server, clean, sizeof(s_info.server));
+        s_info.id[0] = s_info.claim_url[0] = s_info.owner[0] = 0;
+        s_secret[0] = 0;
+        s_info.state = OS_CLOUD_OFFLINE;
+        s_info.error = NULL;
+        s_next_ms = -1;
+    }
+    unlock();
+    if (changed || clear) {
+        nvs_save("server", clear ? "" : clean);
+    }
+    if (changed) {
+        nvs_save("id", "");
+        nvs_save("secret", "");
+        ESP_LOGI(TAG, "server set to '%s'", clean);
+    }
+    os_cloud_refresh();
+}
