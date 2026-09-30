@@ -10,6 +10,7 @@ set(SOLANA_OS_SRCS
     apps/wifi/wifi_app.c
     apps/badge/badge_app.c
     apps/espnow/espnow_app.c
+    apps/skate/skate_app.c
     apps/debug/debug_app.c
     apps/settings/settings_app.c
     apps/about/about_app.c
