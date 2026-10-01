@@ -67,7 +67,7 @@ static int cmd_mem(void)
                (unsigned)s->mem_peak, LUA_HOST_HEAP_MAX);
     }
     if (!lh_stats.id[0]) {
-        printf("no app has run yet\n");
+        printf("no app has finished yet\n");
         return 0;
     }
     printf("last run %s: Lua heap peak %u bytes (cap %d), %u left after close\n"
