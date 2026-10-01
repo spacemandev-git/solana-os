@@ -822,6 +822,17 @@
 int lh_cstack_check(void);
 #define luai_cstackfull()	lh_cstack_check()
 
+/*
+** Solana OS: the host's instruction budget also covers work done in C.
+** Pattern matching (lstrlib.c) charges its steps with luai_patternsteps,
+** and every new coroutine gets the count hook explicitly.
+*/
+struct lua_State;
+void lh_charge_steps(struct lua_State *L, unsigned int n);
+void lh_thread_new(struct lua_State *L1);
+#define luai_patternsteps(L,n)	lh_charge_steps(L, n)
+#define luai_userstatethread(L,L1)	lh_thread_new(L1)
+
 
 
 

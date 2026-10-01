@@ -111,19 +111,53 @@ static void *lh_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
     return p;
 }
 
+static void step_hook(lua_State *L, lua_Debug *ar);
+
+// Over budget: from now on every thread fails at every instruction, so
+// neither pcall() nor a coroutine can keep the script going; a callback that
+// still returns normally is failed by lh_callback. level: where to report.
+static int over_budget(lua_State *L, int level)
+{
+    lh_t *s = lh_get(L);
+    s->killed = true;
+    lua_sethook(L, step_hook, LUA_MASKCOUNT, 1);
+    if (s->L && s->L != L) {
+        lua_sethook(s->L, step_hook, LUA_MASKCOUNT, 1);
+    }
+    luaL_where(L, level);
+    lua_pushliteral(L, "Script took too long");
+    lua_concat(L, 2);
+    if (!s->kill_msg[0]) {
+        strlcpy(s->kill_msg, lua_tostring(L, -1), sizeof(s->kill_msg));
+    }
+    return lua_error(L);
+}
+
 static void step_hook(lua_State *L, lua_Debug *ar)
 {
     lh_t *s = lh_get(L);
     s->steps += LH_HOOK_EVERY;
     if (s->steps > LUA_HOST_STEPS_MAX) {
-        // From now on fail at every instruction, so pcall() can't keep it going.
-        s->killed = true;
-        lua_sethook(L, step_hook, LUA_MASKCOUNT, 1);
-        luaL_where(L, 0);       // level 0: the script line running now
-        lua_pushliteral(L, "Script took too long");
-        lua_concat(L, 2);
-        lua_error(L);
+        over_budget(L, 0);      // level 0: the script line running now
     }
+}
+
+// Work done in C (pattern matching, vendor/lstrlib.c) counts too.
+void lh_charge_steps(lua_State *L, unsigned int n)
+{
+    lh_t *s = lh_get(L);
+    s->steps += n;
+    if (s->steps > LUA_HOST_STEPS_MAX) {
+        over_budget(L, 1);      // level 1: the line that called string.find & co.
+    }
+}
+
+// Every coroutine counts against the same budget (the extra space, and so
+// lh_get, is shared). Threads copy the creator's hook anyway; arming it here
+// doesn't depend on that.
+void lh_thread_new(lua_State *L1)
+{
+    lua_sethook(L1, step_hook, LUA_MASKCOUNT, LH_HOOK_EVERY);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +202,9 @@ static void close_state(lh_t *s)
     s->L = NULL;
 }
 
-// The script failed with rc and its error on the stack. LVGL lock held.
-static void fail(lh_t *s, int rc)
+// The script failed with rc and its error on the stack (or in msg_in).
+// LVGL lock held.
+static void fail(lh_t *s, int rc, const char *msg_in)
 {
     lua_State *L = s->L;
     char msg[200];
@@ -179,7 +214,12 @@ static void fail(lh_t *s, int rc)
         snprintf(msg, sizeof(msg), s->mem_hit ? "The app needs more than %d KB." : "The badge is low on memory.",
                  LUA_HOST_HEAP_MAX / 1024);
     } else {
-        strlcpy(msg, lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "(error is not a string)", sizeof(msg));
+        // Over budget: report where it ran out, not how the error travelled.
+        if (s->killed && s->kill_msg[0]) {
+            msg_in = s->kill_msg;
+        }
+        strlcpy(msg, msg_in ? msg_in : lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1)
+                     : "(error is not a string)", sizeof(msg));
         if (s->killed) {
             title = "Script took too long";
         }
@@ -203,11 +243,17 @@ bool lh_callback(lh_t *s, lua_CFunction fn, void *arg)
         return false;
     }
     s->steps = 0;
+    s->kill_msg[0] = 0;
     lua_pushcfunction(L, fn);
     lua_pushlightuserdata(L, arg);
     int rc = lua_pcall(L, 1, 0, 0);
     if (s->steps > s->steps_peak) {
         s->steps_peak = s->steps;
+    }
+    if (rc == LUA_OK && s->killed) {
+        // The budget ran out inside a coroutine or pcall that swallowed it.
+        fail(s, LUA_ERRRUN, s->kill_msg);
+        return false;
     }
     if (rc != LUA_OK) {
         if (s->ui_off) {
@@ -216,7 +262,7 @@ bool lh_callback(lh_t *s, lua_CFunction fn, void *arg)
             lua_settop(L, 0);
             return false;
         }
-        fail(s, rc);
+        fail(s, rc, NULL);
         return false;
     }
     lh_led_flush(s);
@@ -484,7 +530,7 @@ static void lua_task(void *arg)
             s->failed = true;
             show_error(s, "Out of memory", "Not enough memory to start the app.");
         } else if (rc != LUA_OK) {
-            fail(s, rc);
+            fail(s, rc, NULL);
         } else {
             s->next_tick = lh_now() + LH_TICK_MS;
             lh_callback(s, run_main, NULL);

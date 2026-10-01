@@ -65,6 +65,17 @@ const char *lua_pkg_symbol(const char *icon)
     return LV_SYMBOL_PLAY;
 }
 
+void lua_pkg_plain(char *out, size_t n, const char *in)
+{
+    size_t o = 0;
+    for (; in && *in && o + 1 < n; in++) {
+        if (*in >= 0x20 && *in <= 0x7E) {
+            out[o++] = *in;
+        }
+    }
+    out[o] = 0;
+}
+
 bool lua_pkg_valid_id(const char *id)
 {
     size_t n = id ? strlen(id) : 0;
