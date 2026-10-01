@@ -60,6 +60,12 @@ bool lua_pkg_remove(const char *id);
 // Temporary app past its expiry by the server clock. Unknown time = not expired.
 bool lua_pkg_expired(const lua_pkg_t *p);
 
+// Applies a GET /api/device/library answer to the installed temporary apps:
+// the server extends a quest app's grant while its quest is active, so the
+// expiry in app.json moves forward. Returns how many manifests changed.
+// Small SD writes: fine from app callbacks.
+int lua_pkg_apply_library(const char *body);
+
 // "apps/<id>/<file>" relative to OS_DATA_DIR.
 void lua_pkg_rel(char *out, size_t n, const char *id, const char *file);
 

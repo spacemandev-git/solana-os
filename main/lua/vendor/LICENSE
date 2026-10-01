@@ -2,8 +2,10 @@ Lua 5.4.9 (https://www.lua.org/ftp/lua-5.4.9.tar.gz,
 sha256 2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6),
 src/ only: the core, lauxlib and the base, coroutine, string, table, math and
 utf8 libraries. Not included: lua.c, luac.c, linit.c and the io, os, package
-(loadlib) and debug libraries. The only change is luaconf.h (marked
-"Solana OS"): LUA_32BITS defaults to 1 and LUAI_MAXCCALLS / MAXCCALLS are 64.
+(loadlib) and debug libraries. Changes, all marked "Solana OS": in
+luaconf.h LUA_32BITS defaults to 1, LUAI_MAXCCALLS is 64, MAXCCALLS is 32,
+and luai_cstackfull() hooks the host's native C stack guard, which ldo.c
+(ccall) and lstate.c (luaE_incCstack, luaE_checkcstack) also check.
 
 Copyright (C) 1994-2026 Lua.org, PUC-Rio.
 
