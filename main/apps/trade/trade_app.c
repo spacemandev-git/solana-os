@@ -110,9 +110,13 @@ static void home_row(int i, ui_row_t *r, void *ctx)
         if (t->status == TRADE_REC_REJECTED && t->reason[0]) {
             snprintf(r->sub, sizeof(r->sub), "%s", t->reason);
         } else if (t->status == TRADE_REC_UNCONFIRMED) {
-            snprintf(r->sub, sizeof(r->sub), "Waiting for %s's badge to sync", t->label);
+            char line[64];
+            snprintf(line, sizeof(line), "Waiting for %s's badge to sync", t->label);
+            game_clip(r->sub, sizeof(r->sub), line);
         } else {
-            lv_snprintf(r->sub, sizeof(r->sub), "Gave %s  " LV_SYMBOL_BULLET "  got %s", t->gave, t->got);
+            char line[112];
+            lv_snprintf(line, sizeof(line), "Gave %s, got %s", t->gave, t->got);
+            game_clip(r->sub, sizeof(r->sub), line);
         }
         strlcpy(r->right, status_word(t->status, &r->right_color), sizeof(r->right));
         return;
@@ -404,7 +408,9 @@ static void mine_row(int i, ui_row_t *r, void *ctx)
         } else if (t->i_locked) {
             strlcpy(r->title, LV_SYMBOL_OK " Locked", sizeof(r->title));
             r->title_color = COL_AQUA;
-            snprintf(r->sub, sizeof(r->sub), t->they_locked ? "Signing..." : "Waiting for %s to lock", t->label);
+            char line[64];
+            snprintf(line, sizeof(line), t->they_locked ? "Signing..." : "Waiting for %s to lock", t->label);
+            game_clip(r->sub, sizeof(r->sub), line);
             strlcpy(r->right, "SELECT unlock", sizeof(r->right));
         } else {
             strlcpy(r->title, "Lock offer", sizeof(r->title));

@@ -81,7 +81,7 @@ typedef struct {
 typedef struct {
     char sku[24];
     char name[33];
-    char desc[57];
+    char desc[96];
     int price;
     bool available;
 } item_t;
@@ -337,7 +337,6 @@ static void pages_open(int cat)
     s->cat = cat;
     s->npages = 0;
     s->cursor[0] = 0;
-    lv_obj_set_hidden(s->tabs, true);
     char name[32];
     snprintf(name, sizeof(name), "guide-%s", cats[cat].id);
     cJSON *j = game_cache_get(name, &s->pages_at);
@@ -356,7 +355,6 @@ static void pages_close(void)
     s->mode = V_TABS;
     os_api_cancel(s->pages);            // a page load in flight
     s->loading = false;
-    lv_obj_set_hidden(s->tabs, false);
     lv_obj_set_style_text_color(s->head, ui_col(COL_DIM), 0);
     show_tab(TAB_COLLECTION);
     ui_list_select(s->list, s->cat);
@@ -882,7 +880,7 @@ static void row(int i, ui_row_t *r, void *ctx)
         const item_t *it = &s->items[i];
         char amt[16];
         strlcpy(r->title, it->name, sizeof(r->title));
-        strlcpy(r->sub, it->desc, sizeof(r->sub));
+        game_clip(r->sub, sizeof(r->sub), it->desc);
         if (it->available) {
             game_fmt_lamps(amt, sizeof(amt), it->price);
             lv_snprintf(r->right, sizeof(r->right), "%s !LAMPs", amt);

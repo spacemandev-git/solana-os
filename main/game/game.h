@@ -40,6 +40,11 @@ int game_jint(const cJSON *obj, const char *key, int def);
 // Copy printable ASCII only (the fonts have no other glyphs), truncating.
 void game_ascii(char *out, size_t n, const char *in);
 
+// One line of list sub text (ui_row_t.sub wraps instead of cutting long
+// text): at most GAME_SUB_CHARS characters, "..." when cut.
+#define GAME_SUB_CHARS      42
+void game_clip(char *out, size_t n, const char *in);
+
 // Grouped digits for !LAMPs amounts: 1250 -> "1,250".
 void game_fmt_lamps(char *out, size_t n, int lamps);
 
