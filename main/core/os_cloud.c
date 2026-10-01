@@ -61,6 +61,7 @@ static const char *TAG = "os_cloud";
 #define DEFER_S         10              // retry delay when the heap can't hold a request
 #define HOME_WAIT_MS    3000            // owner change: wait this long for the launcher
 #define LINKED_POLL_S   60              // 409 "linked": ask again until the owner releases it
+#define OWNER_FILE      "owner"         // OS_DATA_DIR/owner: the owner tag, beside the owner's data
 
 // Task notification bits.
 #define BIT_REFRESH     (1u << 0)       // hello now
@@ -170,6 +171,7 @@ typedef struct {
     int status;                     // HTTP status, 0 = no response
     bool ok, claimed;
     bool linked;                    // 409: claimed on the server, and we have no valid secret
+    bool needs_x;                   // "welcome":"needs_x"
     bool deferred;                  // not sent: too little heap right now (e.g. a big app is open)
     char id[16], secret[96], claim_url[160], owner[64];
     char key[33], user[9];
@@ -256,6 +258,8 @@ static void parse(const char *body, hello_t *r)
     const cJSON *owner = cJSON_GetObjectItem(j, "owner");
     const cJSON *time = cJSON_GetObjectItem(j, "time");
     r->claimed = cJSON_IsTrue(cJSON_GetObjectItem(j, "claimed"));
+    const char *welcome = cJSON_GetStringValue(cJSON_GetObjectItem(j, "welcome"));
+    r->needs_x = welcome && !strcmp(welcome, "needs_x");
     r->poll = num_or(j, "poll", POLL_DEFAULT_S);
     r->mesh = num_or(j, "mesh", 0);
     r->lamps = num_or(j, "lamps", 0);
@@ -328,13 +332,35 @@ static void hello(const char *server, const char *secret, bool need_key, hello_t
 // redone at the next hello.
 static void owner_changed(const char *user)
 {
-    ESP_LOGW(TAG, "new owner %s (was %s): wiping %s", user, s_owner_tag, OS_DATA_DIR);
+    ESP_LOGW(TAG, "new owner %s (was %s): wiping %s", user, s_owner_tag[0] ? s_owner_tag : "?", OS_DATA_DIR);
     os_launch(&os_launcher);
     for (int waited = 0; os_current() != &os_launcher && waited < HOME_WAIT_MS; waited += 50) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     os_outbox_clear();
     os_data_wipe();
+}
+
+// The owner tag is kept in NVS and on the card (OS_DATA_DIR/owner). Either
+// one naming someone else means the card holds a previous owner's data: an
+// NVS-only erase (/stock "Erase all data") leaves the card as it was, and a
+// card can move between badges.
+static void check_owner(const char *user)
+{
+    char sd[16] = "";
+    char *raw = os_data_read(OWNER_FILE, sizeof(sd) - 1, NULL);
+    if (raw) {
+        strlcpy(sd, raw, sizeof(sd));
+        sd[strcspn(sd, "\r\n ")] = 0;
+        free(raw);
+    }
+    bool other = (s_owner_tag[0] && strcmp(user, s_owner_tag)) || (sd[0] && strcmp(user, sd));
+    if (other) {
+        owner_changed(user);
+    }
+    if (other || strcmp(sd, user)) {
+        os_data_write(OWNER_FILE, user, strlen(user));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,8 +377,8 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
     if (r->deferred) {
         return DEFER_S;                 // not the server's fault; keep the current state
     }
-    if (r->ok && r->claimed && r->user[0] && s_owner_tag[0] && strcmp(r->user, s_owner_tag)) {
-        owner_changed(r->user);
+    if (r->ok && r->claimed && r->user[0]) {
+        check_owner(r->user);
     }
     lock();
     if (strcmp(server, s_info.server)) {
@@ -418,6 +444,7 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
             s_info.lamps = s_info.level = s_info.packs = 0;
         }
         s_info.claimed = r->claimed;
+        s_info.welcome_needs_x = r->claimed && r->needs_x;
         s_info.synced_ms = now_ms();
         s_info.state = r->claimed ? OS_CLOUD_CLAIMED : OS_CLOUD_UNCLAIMED;
         s_info.error = NULL;
@@ -540,6 +567,7 @@ static void cloud_task(void *arg)
             if (online) {
                 online = false;
                 set_offline();
+                os_http_close();        // the connection died with the Wi-Fi; free its TLS state
             }
             while (os_api_service(false)) {
                 // fail what was queued: no network
@@ -570,6 +598,7 @@ static void cloud_task(void *arg)
             if (os_api_service(os_cloud_registered())) {
                 continue;
             }
+            os_http_tick();             // close the server connection when it has been idle a while
             int64_t wait = next - now;
             xTaskNotifyWait(0, UINT32_MAX, &bits, pdMS_TO_TICKS(wait > WIFI_CHECK_MS ? WIFI_CHECK_MS : wait));
             if (bits & BIT_RESET) {

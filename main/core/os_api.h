@@ -37,7 +37,18 @@ esp_err_t os_api_call(const char *method, const char *path, const char *body, si
 // (decoded) or "". No card: status 0.
 esp_err_t os_api_download(const char *path, const char *dest, size_t max_bytes, os_api_cb_t cb, void *ctx);
 
-void os_api_cancel(void *ctx);              // OS task (on_exit): no callback for ctx runs after this
+// OS task (on_exit): no callback for ctx runs after this. A NULL ctx is never
+// cancelled (os_api_cancel(NULL) does nothing), so a module that cancels must
+// pass a ctx of its own: its state's address, or a unique os_api_token().
+void os_api_cancel(void *ctx);
+void *os_api_token(void);                   // unique non-NULL ctx, never a real address
+
+// The badge keeps one connection to the server open (a TLS handshake needs
+// ~35 KB, much of it in one block; requests on an open connection need a few
+// KB). Call this when an app that talks to the server starts, BEFORE it
+// allocates: if online and no connection is open, the cloud task says hello
+// now, which opens one. Cheap when the connection is already up.
+void os_api_prewarm(void);
 
 // Wi-Fi joined, a server configured and this badge registered (has an id + secret).
 bool os_api_online(void);

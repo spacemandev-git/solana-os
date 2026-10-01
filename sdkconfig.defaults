@@ -58,3 +58,8 @@ CONFIG_LV_USE_QRCODE=y
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+# os_http keeps one connection to the server open: drop the server's
+# certificate after the handshake (~4 KB held otherwise), and keep a session
+# ticket so the handshake after an idle close is a short resumption.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=n
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y

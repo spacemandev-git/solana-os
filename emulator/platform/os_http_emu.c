@@ -14,6 +14,7 @@
 #include "core/os_http.h"
 
 static const char *TAG = "os_http";
+static uint32_t s_requests;
 
 // Requests give up after 10 s, like the badge's esp_http_client timeout.
 
@@ -51,6 +52,7 @@ esp_err_t os_http_request(const char *method, const char *url, const char *beare
     }
     resp[0] = 0;
     *status = 0;
+    s_requests++;
     int id = http_js_start(method, url, bearer, body);
     int rc;
     while ((rc = http_js_poll(id, resp, (int)cap, status)) == 0) {
@@ -108,6 +110,7 @@ esp_err_t os_http_download(const char *url, const char *bearer, const char *path
     if (hdr_out && hdr_cap) {
         hdr_out[0] = 0;
     }
+    s_requests++;
     int id = http_js_download(url, bearer, header);
     int rc;
     while ((rc = http_js_download_poll(id, status, hdr_out, hdr_out ? (int)hdr_cap : 0)) == 0) {
@@ -139,4 +142,25 @@ esp_err_t os_http_download(const char *url, const char *bearer, const char *path
     }
     free(buf);
     return err;
+}
+
+// The browser keeps its own connections alive: nothing to manage here.
+
+void os_http_tick(void)
+{
+}
+
+void os_http_close(void)
+{
+}
+
+bool os_http_connected(void)
+{
+    return false;
+}
+
+void os_http_stats(uint32_t *requests, uint32_t *connects)
+{
+    *requests = s_requests;
+    *connects = 0;
 }

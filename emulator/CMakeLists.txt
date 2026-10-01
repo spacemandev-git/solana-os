@@ -83,7 +83,9 @@ set(PLATFORM_SRCS
     ${EMU}/platform/esp_wifi_emu.c
     ${CJSON_DIR}/cJSON.c
 )
-set_source_files_properties(${CJSON_DIR}/cJSON.c PROPERTIES COMPILE_OPTIONS "-w")
+# Same depth cap as the badge (main/CMakeLists.txt): untrusted mesh JSON.
+set_source_files_properties(${CJSON_DIR}/cJSON.c PROPERTIES COMPILE_OPTIONS "-w"
+                            COMPILE_DEFINITIONS "CJSON_NESTING_LIMIT=16")
 
 # ---- sdkconfig.h from the badge's sdkconfig (LVGL + firmware CONFIG_*) ----
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
