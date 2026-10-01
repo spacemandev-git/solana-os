@@ -23,6 +23,21 @@
 #define COL_WARN        COL_YELLOW
 #define COL_ERR         COL_ORANGE
 
+// Guide page categories and rarities (docs/HHGTS.md; web: --cat-*, --rarity-*).
+#define COL_CAT_EVENTS      COL_PINK
+#define COL_CAT_CULTURE     COL_ORANGE
+#define COL_CAT_TECH        COL_BLUE
+#define COL_CAT_RELEASES    COL_GREEN
+#define COL_CAT_ECOSYSTEM   COL_AQUA
+#define COL_CAT_HISTORY     COL_YELLOW
+#define COL_CAT_PEOPLE      COL_LPURPLE
+#define COL_CAT_LORE        COL_LIME
+#define COL_RARITY_COMMON   COL_DIM
+#define COL_RARITY_RARE     COL_BLUE
+#define COL_RARITY_EPIC     COL_PURPLE
+#define COL_RARITY_LEGEND   COL_GREEN    // plus the gradient bar / purple->green LED sweep
+#define COL_LAMPS           COL_GREEN    // !LAMPs amounts
+
 // Screen layout: status bar on top, app root below.
 #define OS_STATUS_H     22
 #define OS_ROOT_W       BOARD_LCD_H_RES

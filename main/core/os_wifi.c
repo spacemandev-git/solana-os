@@ -281,3 +281,20 @@ void os_wifi_resume(void)
     }
     UNLOCK();
 }
+
+// STUB for the HH GtS contract; firmware agent "fw-core" makes Wi-Fi off at boot.
+void os_wifi_set_enabled(bool on)
+{
+    char ssid[33], pass[65];
+    if (on && os_wifi_saved_ssid(ssid, sizeof(ssid))) {
+        if (!os_wifi_saved_pass(pass, sizeof(pass))) {
+            pass[0] = 0;
+        }
+        os_wifi_connect(ssid, pass);
+    }
+}
+
+bool os_wifi_enabled(void)
+{
+    return os_wifi_state() == OS_WIFI_CONNECTED || os_wifi_state() == OS_WIFI_CONNECTING;
+}

@@ -41,6 +41,11 @@ void os_splash(void);
 void os_launch(const os_app_t *app);
 void os_launch_id(const char *id);
 void os_inject_key(os_key_t key);
+
+// Run fn(arg) on the OS task with the LVGL lock held, after the current
+// callback. Safe from any task (mesh handlers, API callbacks, timers). Returns
+// false if the queue is full; then fn is not called.
+bool os_post(void (*fn)(void *arg), void *arg);
 void os_toast(const char *fmt, ...);
 const os_app_t *os_current(void);
 

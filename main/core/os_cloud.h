@@ -7,6 +7,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum {
     OS_CLOUD_OFFLINE,       // no Wi-Fi yet, or no server configured
@@ -26,9 +27,22 @@ typedef struct {
     int http_status;        // status of the last response, 0 = none (network error)
     int retry_s;            // seconds until the next hello, -1 = not scheduled
     bool busy;              // a hello is in flight (any state)
+    // Owner's game state from the last hello (server/API.md), valid when claimed.
+    char user[9];           // owner tag; a change wipes /sdcard/hh (new owner)
+    int lamps;              // !LAMPs balance
+    int level;              // X Dex Level
+    int packs;              // unopened packs
+    bool has_key;           // mesh key stored
+    int mesh_channel;       // from hello; default CONFIG_SOLANA_OS_MESH_CHANNEL
 } os_cloud_info_t;
 
 void os_cloud_init(void);                   // after os_wifi_init()
 void os_cloud_get_info(os_cloud_info_t *out);
 void os_cloud_refresh(void);                // say hello now instead of at the next poll
 void os_cloud_set_server(const char *url);  // saved to NVS; "" clears
+
+// For os_api / os_mesh (any task).
+bool os_cloud_bearer(char *out, size_t n);  // badge secret; false if none
+bool os_cloud_mesh_key(uint8_t out[16]);    // false if none
+int64_t os_cloud_time_ms(void);             // server clock estimate (unix ms), 0 = never synced
+void os_cloud_note_lamps(int lamps, int level);  // newer figures from another API answer

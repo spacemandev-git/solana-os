@@ -25,11 +25,13 @@ static const char *TAG = "os";
 #define TOAST_MS            2200
 #define STATUS_EVERY_MS     1000
 
-typedef enum { EV_BUTTONS, EV_KEY, EV_LAUNCH, EV_SHOT } ev_kind_t;
+typedef enum { EV_BUTTONS, EV_KEY, EV_LAUNCH, EV_SHOT, EV_CALL } ev_kind_t;
 typedef struct {
     ev_kind_t kind;
     uint32_t a, b;
     const os_app_t *app;
+    void (*fn)(void *arg);
+    void *arg;
 } os_event_t;
 
 static QueueHandle_t s_q;
@@ -236,11 +238,14 @@ static void dispatch(os_key_t key, bool repeat)
     }
 }
 
-static void post(os_event_t ev)
+static bool post(os_event_t ev)
 {
-    if (s_q) {
-        xQueueSend(s_q, &ev, 0);
-    }
+    return s_q && xQueueSend(s_q, &ev, 0) == pdTRUE;
+}
+
+bool os_post(void (*fn)(void *arg), void *arg)
+{
+    return post((os_event_t){ .kind = EV_CALL, .fn = fn, .arg = arg });
 }
 
 void os_launch(const os_app_t *app)
@@ -370,6 +375,9 @@ static void handle(const os_event_t *ev, os_key_t *held, int64_t *next_repeat, u
     case EV_SHOT:
         take_screenshot();
         break;
+    case EV_CALL:
+        ev->fn(ev->arg);
+        break;
     }
 }
 
@@ -445,7 +453,7 @@ void os_splash(void)
 
 void os_start(void)
 {
-    s_q = xQueueCreate(16, sizeof(os_event_t));
+    s_q = xQueueCreate(32, sizeof(os_event_t));
     os_keys_load();
 
     lvgl_port_lock(0);

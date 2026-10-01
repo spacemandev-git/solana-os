@@ -452,3 +452,33 @@ void os_cloud_set_server(const char *url)
     }
     os_cloud_refresh();
 }
+
+// ---------------------------------------------------------------------------
+// STUBS for the HH GtS contract (os_cloud.h); firmware agent "fw-core" implements them.
+
+bool os_cloud_bearer(char *out, size_t n)
+{
+    lock();
+    bool ok = s_secret[0] != 0;
+    strlcpy(out, s_secret, n);
+    unlock();
+    return ok;
+}
+
+bool os_cloud_mesh_key(uint8_t out[16])
+{
+    return false;
+}
+
+int64_t os_cloud_time_ms(void)
+{
+    return 0;
+}
+
+void os_cloud_note_lamps(int lamps, int level)
+{
+    lock();
+    s_info.lamps = lamps;
+    s_info.level = level;
+    unlock();
+}

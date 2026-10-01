@@ -9,4 +9,12 @@ menu "Solana OS"
             command "server <url>" overrides it (stored in NVS "cloud/server").
             Empty means the badge does not talk to a server until one is set.
 
+    config SOLANA_OS_MESH_CHANNEL
+        int "Default ESP-NOW mesh channel"
+        range 1 13
+        default 1
+        help
+            Channel badges park on for ESP-NOW (docs/MESH.md) until the
+            server's hello says otherwise (MESH_CHANNEL on the server).
+
 endmenu

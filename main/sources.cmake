@@ -6,6 +6,7 @@
 
 set(SOLANA_OS_SRCS
     core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c
+    core/os_mesh.c core/os_api.c core/os_data.c
     apps/registry.c
     apps/wifi/wifi_app.c
     apps/badge/badge_app.c

@@ -38,6 +38,12 @@ esp_err_t os_wifi_scan_start(void);
 bool os_wifi_scan_done(void);
 int os_wifi_scan_results(wifi_ap_record_t *out, int max);
 
+// Wi-Fi is off at every boot (docs/HHGTS.md): the radio runs (ESP-NOW needs
+// it) but no network is joined until the user, or a Lua app with the "wifi"
+// permission, turns it on. On = join the saved network; off = leave it.
+void os_wifi_set_enabled(bool on);
+bool os_wifi_enabled(void);
+
 // Credentials are saved to NVS once the connection gets an IP.
 esp_err_t os_wifi_connect(const char *ssid, const char *pass);
 void os_wifi_forget(void);
