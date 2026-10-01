@@ -45,9 +45,6 @@ void game_ascii(char *out, size_t n, const char *in);
 #define GAME_SUB_CHARS      42
 void game_clip(char *out, size_t n, const char *in);
 
-// Grouped digits for !LAMPs amounts: 1250 -> "1,250".
-void game_fmt_lamps(char *out, size_t n, int lamps);
-
 // Peer label for UI text: the owner label, else "badge <ID>".
 void game_peer_label(const char *name, const char *id, char *out, size_t n);
 // Signal bars from RSSI, e.g. "|||." (sol_mono_12 has no bar glyphs).

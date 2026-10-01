@@ -60,6 +60,7 @@ typedef struct {
     ui_list_t *mine;
     char sig[96];                   // what the trade screen shows, to redraw on change
     int64_t cancel_armed;
+    int ask_mine, ask_theirs;       // revisions shown when the lock confirm opened
     // Picker
     lv_obj_t *picker;
     ui_list_t *goods_list;
@@ -384,9 +385,8 @@ static void bundle_text(const trade_bundle_t *b, char *out, size_t n)
     size_t len = 0;
     out[0] = 0;
     if (b->lamps) {
-        char amt[16];
-        game_fmt_lamps(amt, sizeof(amt), b->lamps);
-        len = snprintf(out, n, "%s !LAMPs", amt);
+        char amt[24];
+        len = snprintf(out, n, "%s", ui_fmt_lamps(amt, sizeof(amt), b->lamps));
     }
     for (int i = 0; i < b->nitems + b->npages && len < n; i++) {
         const char *name = i < b->nitems ? b->items[i].name : b->pages[i - b->nitems].name;
@@ -420,12 +420,10 @@ static void mine_row(int i, ui_row_t *r, void *ctx)
         }
         break;
     case R_LAMPS: {
-        char amt[16], bal[16];
-        game_fmt_lamps(amt, sizeof(amt), t->mine.lamps);
-        game_fmt_lamps(bal, sizeof(bal), balance());
-        snprintf(r->title, sizeof(r->title), "%s !LAMPs", amt);
+        char bal[24];
+        ui_fmt_lamps(r->title, sizeof(r->title), t->mine.lamps);
         r->title_color = COL_LAMPS;
-        snprintf(r->sub, sizeof(r->sub), "You have %s !LAMPs", bal);
+        snprintf(r->sub, sizeof(r->sub), "You have %s", ui_fmt_lamps(bal, sizeof(bal), balance()));
         strlcpy(r->right, LV_SYMBOL_LEFT " " LV_SYMBOL_RIGHT, sizeof(r->right));
         break;
     }
@@ -549,6 +547,20 @@ static void render_trade(bool force)
     set_hint();
 }
 
+static void lock_confirmed(bool yes, void *ctx)
+{
+    const trade_view_t *t = trade_current();
+    if (!yes || !s || !t) {
+        return;
+    }
+    if (t->my_rev != s->ask_mine || t->their_rev != s->ask_theirs) {
+        os_toast("The offers changed. Check them and lock again");
+        return;
+    }
+    trade_lock(true);
+    render_trade(false);
+}
+
 static bool trade_key(os_key_t k, bool repeat)
 {
     const trade_view_t *t = trade_current();
@@ -602,7 +614,16 @@ static bool trade_key(os_key_t k, bool repeat)
     }
     switch (sel) {
     case R_LOCK:
-        trade_lock(!t->i_locked);
+        if (t->i_locked) {
+            trade_lock(false);
+        } else {
+            // Locking can make the trade final: the OS asks, not the app.
+            char q[96];
+            snprintf(q, sizeof(q), "Lock your offer? The trade signs as soon as %s locks too.", t->label);
+            s->ask_mine = t->my_rev;
+            s->ask_theirs = t->their_rev;
+            os_confirm(q, lock_confirmed, NULL);
+        }
         break;
     case R_LAMPS:
         break;
