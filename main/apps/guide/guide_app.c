@@ -79,6 +79,7 @@ typedef struct {
     bool touched;               // the user moved: don't jump to Packs any more
     bool welcomed;              // the welcome showed this time
     bool was_online;
+    bool failed;                // the last server request failed
     // Collection
     struct { int owned, total; } catn[CAT_COUNT];
     int owned, total;
@@ -148,13 +149,18 @@ static void page_from_json(page_t *p, const cJSON *j)
 }
 
 // Header line: what the tab shows and how fresh it is.
-static void head_set(const char *left, int64_t at, bool cached)
+static void head_set(const char *left, int64_t at)
 {
     char synced[32] = "";
-    if (cached && !os_api_online()) {
+    if (!os_api_online()) {
         game_synced(at, synced, sizeof(synced));
     }
     lv_label_set_text_fmt(s->head, "%s%s%s", left, synced[0] ? "  " LV_SYMBOL_BULLET "  " : "", synced);
+}
+
+static const char *loading_text(void)
+{
+    return s->failed ? "Couldn't reach the server. Try again later" : "Loading...";
 }
 
 // The shared offline panel covers the list when there's nothing saved to
@@ -192,14 +198,15 @@ static void collection_render(void)
     } else {
         left[0] = 0;
     }
-    head_set(left, s->guide_at, true);
+    head_set(left, s->guide_at);
     offline_show(!s->total);
-    ui_list_set_empty(s->list, "Loading...");
+    ui_list_set_empty(s->list, loading_text());
     ui_list_set_count(s->list, s->total ? CAT_COUNT : 0);
 }
 
 static void got_guide(int status, const char *body, void *ctx)
 {
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         guide_apply(j);
@@ -243,10 +250,10 @@ static void pages_render(void)
     char left[48];
     snprintf(left, sizeof(left), "%s  " LV_SYMBOL_BULLET "  %d of %d", ui_cat_name(cats[s->cat]), s->catn[s->cat].owned,
              s->catn[s->cat].total);
-    head_set(left, s->pages_at, true);
+    head_set(left, s->pages_at);
     lv_obj_set_style_text_color(s->head, ui_col(ui_cat_color(cats[s->cat])), 0);
     offline_show(!s->npages);
-    ui_list_set_empty(s->list, s->loading ? "Loading..." : "Nothing here yet");
+    ui_list_set_empty(s->list, s->loading || (s->failed && !s->npages) ? loading_text() : "Nothing here yet");
     ui_list_set_count(s->list, s->npages);
 }
 
@@ -254,6 +261,7 @@ static void got_pages(int status, const char *body, void *ctx)
 {
     bool first = !s->cursor[0];
     s->loading = false;
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         if (first) {
@@ -514,14 +522,15 @@ static void packs_render(void)
     }
     char left[32];
     snprintf(left, sizeof(left), "%d unopened", s->npacks);
-    head_set(left, s->packs_at, true);
+    head_set(left, s->packs_at);
     offline_show(!s->packs_at);
-    ui_list_set_empty(s->list, "No packs. Get one in the Shop.");
+    ui_list_set_empty(s->list, s->packs_at ? "No packs. Get one in the Shop." : loading_text());
     ui_list_set_count(s->list, s->npacks);
 }
 
 static void got_packs(int status, const char *body, void *ctx)
 {
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         packs_apply(j);
@@ -685,14 +694,15 @@ static void shop_render(void)
         snprintf(left, sizeof(left), "You have %s", ui_fmt_lamps(amt, sizeof(amt), in->lamps));
         free(in);
     }
-    head_set(left, s->shop_at, true);
+    head_set(left, s->shop_at);
     offline_show(!s->shop_at);
-    ui_list_set_empty(s->list, s->shop_at ? "The shop is empty" : "Loading...");
+    ui_list_set_empty(s->list, s->shop_at ? "The shop is empty" : loading_text());
     ui_list_set_count(s->list, s->nitems);
 }
 
 static void got_shop(int status, const char *body, void *ctx)
 {
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         shop_apply(j);
