@@ -372,6 +372,8 @@ static void library_cb(int status, const char *body, void *ctx)
     if ((uintptr_t)ctx != s_tok_lib || !s_open) {
         return;
     }
+    // Quest grants run longer while their quest is active: keep app.json's expiry current.
+    bool moved = status == 200 && lua_pkg_apply_library(body) > 0;
     cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
     const cJSON *it;
     int64_t now = os_cloud_time_ms();
@@ -397,7 +399,7 @@ static void library_cb(int status, const char *body, void *ctx)
         }
     }
     cJSON_Delete(j);
-    if (rm) {
+    if (rm || moved) {
         scan_installed();
     }
     if (!s_detail && !s_kb) {

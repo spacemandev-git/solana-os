@@ -4,7 +4,9 @@
 // time they have left.
 //
 // Reading every app.json walks the card, so a worker task does it and hands
-// the list over under a mutex; on_tick picks it up.
+// the list over under a mutex; on_tick picks it up. Online, the library
+// (GET /api/device/library) first moves quest apps' expiry forward: the
+// server extends a grant while its quest is active.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "core/os.h"
+#include "core/os_api.h"
 #include "core/os_cloud.h"
 #include "core/ui.h"
 #include "lua/lua_host.h"
@@ -36,6 +39,8 @@ static lv_obj_t *s_root, *s_info, *s_hint;
 static ui_list_t *s_list;
 static int s_rm_index = -1;             // LEFT pressed once on this row
 static int64_t s_rm_until;
+static uint32_t s_lib_token;            // library request in flight
+static bool s_lib_done;                 // expiry times refreshed this visit
 
 static int64_t now_ms(void)
 {
@@ -138,6 +143,31 @@ static void render_list(void)
     set_hint();
 }
 
+// Library answer (OS task): refresh expiry times, then re-read the card.
+static void library_cb(int status, const char *body, void *ctx)
+{
+    if ((uintptr_t)ctx != s_lib_token || !s_open) {
+        return;
+    }
+    s_lib_token = 0;
+    s_lib_done = status == 200;
+    if (s_lib_done && lua_pkg_apply_library(body) > 0) {
+        start_worker(NULL);
+    }
+}
+
+static void refresh_library(void)
+{
+    static uint32_t seq;
+    if (s_lib_done || s_lib_token || !os_api_online()) {
+        return;
+    }
+    s_lib_token = ++seq;
+    if (os_api_call("GET", "/api/device/library", NULL, 0, library_cb, (void *)(uintptr_t)s_lib_token) != ESP_OK) {
+        s_lib_token = 0;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Info
 
@@ -212,10 +242,17 @@ static void enter(lv_obj_t *root)
     xSemaphoreGive(s_mx);
     render_list();
     start_worker(NULL);
+    s_lib_done = false;
+    s_lib_token = 0;
+    refresh_library();
 }
 
 static void leave(void)
 {
+    if (s_lib_token) {
+        os_api_cancel((void *)(uintptr_t)s_lib_token);
+        s_lib_token = 0;
+    }
     xSemaphoreTake(s_mx, portMAX_DELAY);
     s_open = false;
     free(s_inbox);
@@ -243,6 +280,7 @@ static void tick(void)
             ui_list_select(s_list, sel);
         }
     }
+    refresh_library();          // once the badge comes online
     if (s_rm_index >= 0 && now_ms() > s_rm_until) {
         s_rm_index = -1;
         ui_list_refresh(s_list);

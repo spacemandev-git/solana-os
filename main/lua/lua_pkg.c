@@ -186,3 +186,41 @@ bool lua_pkg_expired(const lua_pkg_t *p)
     int64_t now = os_cloud_time_ms();
     return p->temp && p->expires && now && now >= p->expires;
 }
+
+static bool set_expires(const char *id, int64_t expires)
+{
+    char rel[64];
+    lua_pkg_rel(rel, sizeof(rel), id, "app.json");
+    char *json = os_data_read(rel, LUA_PKG_JSON_MAX, NULL);
+    cJSON *m = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    char *out = NULL;
+    if (cJSON_IsObject(m)) {
+        cJSON_DeleteItemFromObjectCaseSensitive(m, "expires");
+        cJSON_AddNumberToObject(m, "expires", (double)expires);
+        out = cJSON_PrintUnformatted(m);
+    }
+    cJSON_Delete(m);
+    bool ok = out && os_data_write(rel, out, strlen(out));
+    cJSON_free(out);
+    return ok;
+}
+
+int lua_pkg_apply_library(const char *body)
+{
+    cJSON *j = body ? cJSON_Parse(body) : NULL;
+    const cJSON *it;
+    int changed = 0;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItemCaseSensitive(j, "items")) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(it, "id");
+        const cJSON *exp = cJSON_GetObjectItemCaseSensitive(it, "expires");
+        lua_pkg_t pkg;
+        if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(it, "temp")) || !cJSON_IsString(id) || !cJSON_IsNumber(exp)
+                || !lua_pkg_load(id->valuestring, &pkg) || !pkg.temp || pkg.expires == (int64_t)exp->valuedouble) {
+            continue;
+        }
+        changed += set_expires(pkg.id, (int64_t)exp->valuedouble);
+    }
+    cJSON_Delete(j);
+    return changed;
+}
