@@ -64,6 +64,9 @@ void game_synced(int64_t at_ms, char *out, size_t n);
 void game_led_flash(uint32_t rgb);
 void game_led_sweep(void);
 uint32_t game_parse_hex(const char *hex, uint32_t def);
+// A server-chosen colour (a character's accent) made readable as text on the
+// current theme: light ones darkened on white, dark ones lightened on black.
+uint32_t game_ink(uint32_t rgb);
 
 // Each service's half of game.c: init, tick and mesh dispatch.
 void xdex_init(void);

@@ -35,6 +35,7 @@ typedef enum { V_NONE, V_OFFLINE, V_NO_SERVER, V_CONNECTING, V_UNCLAIMED, V_CLAI
 typedef struct {
     int owned, total;           // pages; total 0 = unknown
     int next_bounty;            // 0 = unknown
+    bool needs_x;               // X Dex bounties wait for the owner to link X
     char pack[40];              // first unopened pack's name, "" = unknown
     int64_t at;                 // server time of the data (unix ms), 0 = unknown
     bool fetching;
@@ -135,6 +136,7 @@ static void cache_load(void)
     if (cJSON_IsNumber(v = cJSON_GetObjectItem(j, "nextBounty"))) {
         s_me.next_bounty = v->valueint;
     }
+    s_me.needs_x = cJSON_IsTrue(cJSON_GetObjectItem(j, "needsX"));
     if (cJSON_IsNumber(v = cJSON_GetObjectItem(j, "time"))) {
         s_me.at = (int64_t)v->valuedouble;
     }
@@ -146,8 +148,9 @@ static void cache_load(void)
 static void cache_save(void)
 {
     char buf[200];
-    snprintf(buf, sizeof(buf), "{\"pages\":{\"owned\":%d,\"total\":%d},\"nextBounty\":%d,\"pack\":\"%s\",\"time\":%lld}",
-             s_me.owned, s_me.total, s_me.next_bounty, s_me.pack, (long long)s_me.at);
+    snprintf(buf, sizeof(buf),
+             "{\"pages\":{\"owned\":%d,\"total\":%d},\"nextBounty\":%d,\"needsX\":%s,\"pack\":\"%s\",\"time\":%lld}",
+             s_me.owned, s_me.total, s_me.next_bounty, s_me.needs_x ? "true" : "false", s_me.pack, (long long)s_me.at);
     os_data_write(CACHE, buf, strlen(buf));
 }
 
@@ -192,6 +195,7 @@ static void on_me(int status, const char *body, void *ctx)
     s_me.owned = cJSON_IsNumber(v = cJSON_GetObjectItem(pages, "owned")) ? v->valueint : 0;
     s_me.total = cJSON_IsNumber(v = cJSON_GetObjectItem(pages, "total")) ? v->valueint : 0;
     s_me.next_bounty = cJSON_IsNumber(v = cJSON_GetObjectItem(j, "nextBounty")) ? v->valueint : 0;
+    s_me.needs_x = cJSON_IsTrue(cJSON_GetObjectItem(j, "needsX"));
     s_me.at = cJSON_IsNumber(v = cJSON_GetObjectItem(j, "time")) ? (int64_t)v->valuedouble : os_cloud_time_ms();
     if (cJSON_IsNumber(lamps) && cJSON_IsNumber(level)) {
         os_cloud_note_lamps(lamps->valueint, level->valueint);
@@ -347,6 +351,10 @@ static void build_claimed(const os_cloud_info_t *in)
         lv_obj_t *l = ui_label(action, &sol_font_14, COL_TEXT, "");
         lv_label_set_text_fmt(l, "SELECT: open your %s", s_me.pack[0] ? s_me.pack : in->packs > 1 ? "packs" : "pack");
         lv_obj_center(l);
+    } else if (s_me.needs_x) {
+        // Bounties only pay when both owners have linked X (server/API.md).
+        action = ui_label(s_view, &sol_font_14, COL_YELLOW, "Link X on the web to earn bounties");
+        lv_obj_align(action, LV_ALIGN_TOP_MID, 0, 144);
     } else if (s_me.next_bounty) {
         char amount[32];
         action = ui_label(s_view, &sol_font_14, COL_DIM, "");
@@ -490,7 +498,8 @@ static void build(const os_cloud_info_t *in, view_t v)
 
 static bool same_me(const me_t *a, const me_t *b)
 {
-    return a->owned == b->owned && a->total == b->total && a->next_bounty == b->next_bounty && !strcmp(a->pack, b->pack);
+    return a->owned == b->owned && a->total == b->total && a->next_bounty == b->next_bounty && a->needs_x == b->needs_x
+        && !strcmp(a->pack, b->pack);
 }
 
 static void render(bool force)

@@ -277,6 +277,21 @@ uint32_t game_parse_hex(const char *hex, uint32_t def)
     return *end ? def : (uint32_t)v;
 }
 
+uint32_t game_ink(uint32_t rgb)
+{
+    int c[3] = {(int)(rgb >> 16) & 0xFF, (int)(rgb >> 8) & 0xFF, (int)rgb & 0xFF};
+    int lum = (299 * c[0] + 587 * c[1] + 114 * c[2]) / 1000;   // perceived brightness, 0..255
+    const int dark_max = 110, light_min = 120;                  // ~4.5:1 against white / black
+    for (int i = 0; i < 3; i++) {
+        if (ui_light() && lum > dark_max) {
+            c[i] = c[i] * dark_max / lum;
+        } else if (!ui_light() && lum < light_min) {
+            c[i] += (255 - c[i]) * (light_min - lum) / (255 - lum);
+        }
+    }
+    return (uint32_t)c[0] << 16 | (uint32_t)c[1] << 8 | (uint32_t)c[2];
+}
+
 // ---------------------------------------------------------------------------
 // Cache: {"at":<unix ms>,"body":<server answer>}
 

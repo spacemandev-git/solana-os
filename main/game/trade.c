@@ -25,6 +25,7 @@
 #include "core/os_cloud.h"
 #include "core/os_cmd.h"
 #include "core/os_data.h"
+#include "core/ui.h"
 #include "trade.h"
 
 static const char *TAG = "trade";
@@ -272,15 +273,59 @@ static bool build_terms(const trade_t *t, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
-static void summary(const trade_bundle_t *b, char *out, size_t cap)
+static bool pagedir_find(const char *id, int *number, char *title, size_t n)
+{
+    char path[96], line[128];
+    os_data_path(path, sizeof(path), TRADE_PAGEDIR);
+    FILE *f = os_data_ready() ? fopen(path, "r") : NULL;
+    size_t idlen = strlen(id);
+    bool found = false;
+    while (f && !found && fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, id, idlen) && line[idlen] == '|') {
+            char *num = line + idlen + 1, *t = strchr(num, '|');
+            found = t != NULL;
+            if (found) {
+                *number = atoi(num);
+                t[strcspn(t, "\r\n")] = 0;
+                game_ascii(title, n, t + 1);
+            }
+        }
+    }
+    if (f) {
+        fclose(f);
+    }
+    return found;
+}
+
+void trade_label(bool theirs, bool page, const trade_thing_t *th, char *out, size_t n)
+{
+    int number;
+    char title[TRADE_NAME_LEN + 1];
+    if (page && pagedir_find(th->id, &number, title, sizeof(title)) && (title[0] || theirs)) {
+        if (title[0]) {
+            snprintf(out, n, "#%03d %.*s", number, TRADE_NAME_LEN, title);
+        } else {
+            snprintf(out, n, "#%03d %.*s (their label)", number, TRADE_NAME_LEN, th->name);
+        }
+    } else if (theirs) {
+        snprintf(out, n, "%.*s (their label)", TRADE_NAME_LEN, th->name);
+    } else {
+        strlcpy(out, th->name, n);
+    }
+}
+
+static void summary(const trade_bundle_t *b, bool theirs, char *out, size_t cap)
 {
     size_t len = 0;
     out[0] = 0;
     if (b->lamps) {
-        len += snprintf(out, cap, "%d !LAMPs", b->lamps);
+        char amt[24];
+        len += snprintf(out, cap, "%s", ui_fmt_lamps(amt, sizeof(amt), b->lamps));
     }
     for (int i = 0; i < b->nitems + b->npages && len < cap; i++) {
-        const char *name = i < b->nitems ? b->items[i].name : b->pages[i - b->nitems].name;
+        bool page = i >= b->nitems;
+        char name[TRADE_NAME_LEN + 24];
+        trade_label(theirs, page, page ? &b->pages[i - b->nitems] : &b->items[i], name, sizeof(name));
         len += snprintf(out + len, cap - len, "%s%s", len ? ", " : "", name);
     }
     if (!out[0]) {
@@ -380,8 +425,8 @@ static void upload(const trade_t *t)
 static void record(const trade_t *t)
 {
     char gave[64], got[64];
-    summary(&t->v.mine, gave, sizeof(gave));
-    summary(&t->v.theirs, got, sizeof(got));
+    summary(&t->v.mine, false, gave, sizeof(gave));
+    summary(&t->v.theirs, true, got, sizeof(got));
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "tid", t->v.tid);
     cJSON_AddStringToObject(j, "peer", t->v.peer);

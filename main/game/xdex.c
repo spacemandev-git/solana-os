@@ -161,8 +161,14 @@ static void store_card(xdex_card_t *c)
 
 typedef struct {
     char peer[OS_MESH_ID_LEN + 1];
+    bool recheck;                       // asking again after the outbox sent it
     char body[];
 } upload_t;
+
+// The last swap's upload while it waits in the outbox. The outbox doesn't
+// report answers, so once it has drained we post the same entry once more:
+// the server answers a repeat with its first result (bounty, verified).
+static char *s_queued;
 
 static void toast_result(void)
 {
@@ -188,15 +194,26 @@ static void toast_result(void)
     }
 }
 
+static void queue_for_recheck(const char *body)
+{
+    free(s_queued);
+    s_queued = strdup(body);
+}
+
 static void uploaded(int status, const char *body, void *ctx)
 {
     upload_t *u = ctx;
     bool mine = !strcmp(u->peer, s_last.peer) && s_last.upload == XDEX_UP_SENDING;
     if (status == 0 || status >= 500) {
-        os_outbox_add("/api/device/xdex", u->body);
+        if (!u->recheck) {
+            os_outbox_add("/api/device/xdex", u->body);
+        }
         if (mine) {
             s_last.upload = XDEX_UP_QUEUED;
-            toast_result();
+            queue_for_recheck(u->body);
+            if (!u->recheck) {
+                toast_result();
+            }
         }
         free(u);
         return;
@@ -257,6 +274,7 @@ static void upload(const xdex_card_t *c, const char *nonce, const char *tag)
         upload_t *u = malloc(sizeof(upload_t) + len + 1);
         if (u) {
             strlcpy(u->peer, c->id, sizeof(u->peer));
+            u->recheck = false;
             memcpy(u->body, body, len + 1);
             if (os_api_call("POST", "/api/device/xdex", body, 0, uploaded, u) == ESP_OK) {
                 s_last.upload = XDEX_UP_SENDING;
@@ -269,14 +287,38 @@ static void upload(const xdex_card_t *c, const char *nonce, const char *tag)
         if (os_outbox_add("/api/device/xdex", body) != ESP_OK) {
             s_last.upload = XDEX_UP_REFUSED;
             strlcpy(s_last.error, "outbox full", sizeof(s_last.error));
+        } else {
+            queue_for_recheck(body);
         }
         toast_result();
     }
     cJSON_free(body);
 }
 
+// The outbox has sent the last swap's entry: ask once more for its result.
+static void recheck(void)
+{
+    size_t len = strlen(s_queued);
+    upload_t *u = malloc(sizeof(upload_t) + len + 1);
+    if (!u) {
+        return;
+    }
+    strlcpy(u->peer, s_last.peer, sizeof(u->peer));
+    u->recheck = true;
+    memcpy(u->body, s_queued, len + 1);
+    if (os_api_call("POST", "/api/device/xdex", s_queued, 0, uploaded, u) == ESP_OK) {
+        s_last.upload = XDEX_UP_SENDING;
+        free(s_queued);
+        s_queued = NULL;
+    } else {
+        free(u);
+    }
+}
+
 static void swapped(xdex_card_t *c, const char *nonce, const char *tag)
 {
+    free(s_queued);                     // an older swap stays in the outbox, unwatched
+    s_queued = NULL;
     store_card(c);
     set_phase(XDEX_SWAPPED, c->id, c->n);
     s_last.bounty = 0;
@@ -540,6 +582,9 @@ void xdex_tick(int64_t now)
         } else if (!s_out_sent || now - s_out_sent > RESEND_MS) {
             send_req();
         }
+    }
+    if (s_last.upload == XDEX_UP_QUEUED && s_queued && os_api_online() && !os_outbox_count()) {
+        recheck();
     }
     // Finished swaps fade back to idle once their result has been seen.
     bool done = s_last.phase == XDEX_DECLINED || s_last.phase == XDEX_NO_ANSWER || s_last.phase == XDEX_FAILED

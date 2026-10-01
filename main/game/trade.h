@@ -100,4 +100,12 @@ typedef struct {
     int64_t at;
 } trade_rec_t;
 int trade_records_load(trade_rec_t **out, int max);
+
+// Page directory, "id|number|title" per line (title "" where the device API
+// hides it: pages you don't own). The Trade app writes it from the server's
+// page list. Only ids are signed in a trade, so a page is shown by this list
+// ("#042 Title"), not by the title a peer sends; the peer's other names are
+// marked "(their label)".
+#define TRADE_PAGEDIR       "cache/pagedir.txt"
+void trade_label(bool theirs, bool page, const trade_thing_t *th, char *out, size_t n);
 void trade_poll_now(void);              // check pending trades with the server now

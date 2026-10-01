@@ -60,7 +60,7 @@ static void row(int i, ui_row_t *r, void *ctx)
     if (s->tab == TAB_NEARBY) {
         const os_mesh_peer_t *b = &s->beacons[i];
         game_ascii(r->title, sizeof(r->title), b->name[0] ? b->name : b->id);
-        r->title_color = b->color ? b->color : COL_TEXT;
+        r->title_color = b->color ? game_ink(b->color) : COL_TEXT;
         game_ascii(r->sub, sizeof(r->sub), b->title);
         strlcpy(r->right, game_signal(b->rssi), sizeof(r->right));
         return;
@@ -249,7 +249,7 @@ static void dialog_render(void)
         s->shown_end = d->end;
         s->sel = 0;
         lv_label_set_text(s->who, d->name[0] ? d->name : d->beacon);
-        lv_obj_set_style_text_color(s->who, ui_col(d->color ? d->color : COL_TEXT), 0);
+        lv_obj_set_style_text_color(s->who, d->color ? lv_color_hex(game_ink(d->color)) : ui_col(COL_TEXT), 0);
         if (d->quest_title[0]) {
             lv_label_set_text_fmt(s->quest, "%s  " LV_SYMBOL_BULLET "  %s", d->title, d->quest_title);
         } else {

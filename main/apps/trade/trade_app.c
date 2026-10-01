@@ -281,11 +281,8 @@ static void goods_show(void)
     ui_list_set_count(s->goods_list, s->ngoods);
 }
 
-// Page directory, "id|number|title" per line in cache/pagedir.txt, written
-// from the full page list the goods loader reads (title "" where the device
-// API hides it: pages you don't own). Only ids are signed in a trade, so a
-// peer's page is shown by this list, not by the title it sends.
-#define PAGEDIR "cache/pagedir.txt"
+// Page directory for trade_label() (trade.h), written from the full page
+// list the goods loader reads.
 
 static void pagedir_add(const cJSON *items)
 {
@@ -300,54 +297,14 @@ static void pagedir_add(const cJSON *items)
     }
     if (buf && len && len < 2048) {
         if (s->dir_started) {
-            os_data_append(PAGEDIR, buf);
+            os_data_append(TRADE_PAGEDIR, buf);
         } else {
             buf[len++] = '\n';
-            os_data_write(PAGEDIR, buf, len);
+            os_data_write(TRADE_PAGEDIR, buf, len);
             s->dir_started = true;
         }
     }
     free(buf);
-}
-
-static bool pagedir_find(const char *id, int *number, char *title, size_t n)
-{
-    char path[96], line[128];
-    os_data_path(path, sizeof(path), PAGEDIR);
-    FILE *f = os_data_ready() ? fopen(path, "r") : NULL;
-    size_t idlen = strlen(id);
-    bool found = false;
-    while (f && !found && fgets(line, sizeof(line), f)) {
-        if (!strncmp(line, id, idlen) && line[idlen] == '|') {
-            char *num = line + idlen + 1, *t = strchr(num, '|');
-            found = t != NULL;
-            if (found) {
-                *number = atoi(num);
-                t[strcspn(t, "\r\n")] = 0;
-                game_ascii(title, n, t + 1);
-            }
-        }
-    }
-    if (f) {
-        fclose(f);
-    }
-    return found;
-}
-
-// The other side's things as we can vouch for them.
-static void their_label(bool page, const trade_thing_t *th, char *out, size_t n)
-{
-    int number;
-    char title[TRADE_NAME_LEN + 1];
-    if (page && pagedir_find(th->id, &number, title, sizeof(title))) {
-        if (title[0]) {
-            lv_snprintf(out, n, "#%03d %s", number, title);
-        } else {
-            lv_snprintf(out, n, "#%03d %s (their label)", number, th->name);
-        }
-    } else {
-        lv_snprintf(out, n, "%s (their label)", th->name);
-    }
 }
 
 static void goods_next(void);
@@ -459,7 +416,7 @@ static void picker_close(void)
 // ---------------------------------------------------------------------------
 // Trade screen
 
-// Our names come from the server; theirs only as their_label() vouches.
+// Our names come from the server; theirs only as trade_label() vouches.
 static void bundle_text(const trade_bundle_t *b, bool theirs, char *out, size_t n)
 {
     size_t len = 0;
@@ -472,11 +429,7 @@ static void bundle_text(const trade_bundle_t *b, bool theirs, char *out, size_t 
         bool page = i >= b->nitems;
         const trade_thing_t *th = page ? &b->pages[i - b->nitems] : &b->items[i];
         char name[TRADE_NAME_LEN + 24];
-        if (theirs) {
-            their_label(page, th, name, sizeof(name));
-        } else {
-            strlcpy(name, th->name, sizeof(name));
-        }
+        trade_label(theirs, page, th, name, sizeof(name));
         len += snprintf(out + len, n - len, "%s%s", len ? ", " : "", name);
     }
     if (!out[0]) {
@@ -1006,8 +959,16 @@ static void on_tick(void)
         }
     } else if (s->view == V_TRADE && s->tick % 3 == 0) {
         render_trade(false);
-        // Both locked: ask the inviter to sign, once per pair of locks.
+        // A confirm whose question no longer applies goes away (the trade
+        // moved on: signed or locked from the console, cancelled, settled).
         const trade_view_t *t = trade_current();
+        if (!t || !t->can_sign) {
+            os_confirm_dismiss(sign_confirmed);
+        }
+        if (!t || t->phase != TRADE_OPEN || t->i_locked) {
+            os_confirm_dismiss(lock_confirmed);
+        }
+        // Both locked: ask the inviter to sign, once per pair of locks.
         if (t && !t->can_sign) {
             s->sign_asked = false;
         } else if (t && !s->sign_asked && !os_confirm_open()) {

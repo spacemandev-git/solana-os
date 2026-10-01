@@ -58,6 +58,9 @@ const os_app_t *os_current(void);
 typedef void (*os_confirm_cb_t)(bool yes, void *ctx);
 void os_confirm(const char *text, os_confirm_cb_t done, void *ctx);
 bool os_confirm_open(void);
+// Close the open confirm if it was opened with `done` (its question no longer
+// applies): done(false, ctx) runs as if CANCEL was pressed. OS task.
+void os_confirm_dismiss(os_confirm_cb_t done);
 
 // Rebuild the UI in the current theme (OS task, LVGL locked; the Settings app).
 void os_theme_apply(void);

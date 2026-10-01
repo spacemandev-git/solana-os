@@ -317,6 +317,13 @@ bool os_confirm_open(void)
     return s_modal != NULL;
 }
 
+void os_confirm_dismiss(os_confirm_cb_t done)
+{
+    if (s_modal && s_modal_cb == done) {
+        confirm_close(false);
+    }
+}
+
 // The dialog takes SELECT and CANCEL; everything else is swallowed. HOME
 // answers no and goes home.
 static bool confirm_key(os_key_t key, bool repeat)

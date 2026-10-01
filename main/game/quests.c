@@ -60,6 +60,7 @@ static quest_entry_t *s_log;
 static int s_nlog;
 static int64_t s_log_at;
 static bool s_log_saved;
+static bool s_log_print;                // the console asked: print the answer when it comes
 static bool s_log_busy;
 static char s_log_error[48];
 
@@ -478,11 +479,45 @@ static void log_from_cache(void)
     cJSON_Delete(body);
 }
 
+static void print_log(void)
+{
+    if (!s_nlog) {
+        printf("quest log: %s\n", s_log_busy ? "checking..." : "nothing saved");
+    }
+    for (int i = 0; i < s_nlog; i++) {
+        printf("  quest %s [%s] %s: %s%s%s\n", s_log[i].id, s_log[i].status, s_log[i].title, s_log[i].step,
+               s_log[i].at[0] ? " @ " : "", s_log[i].at);
+    }
+    if (s_log_error[0]) {
+        printf("  log: %s\n", s_log_error);
+    }
+}
+
+// The log belongs to the Quests app; after the console used it, let it go.
+static void log_release(void)
+{
+    const os_app_t *app = os_current();
+    if (!app || strcmp(app->id, "quests")) {
+        quests_log_free();
+    }
+}
+
+// A fetch the console started has answered: print it.
+static void log_answered(void)
+{
+    if (s_log_print) {
+        s_log_print = false;
+        print_log();
+        log_release();
+    }
+}
+
 static void on_log_api(int status, const char *body, void *ctx)
 {
     s_log_busy = false;
     if (status != 200) {
         snprintf(s_log_error, sizeof(s_log_error), status ? "The server said no (%d)" : "Can't reach the server", status);
+        log_answered();
         return;
     }
     cJSON *j = cJSON_Parse(body);
@@ -493,6 +528,7 @@ static void on_log_api(int status, const char *body, void *ctx)
         s_log_error[0] = 0;
     }
     cJSON_Delete(j);
+    log_answered();
 }
 
 void quests_log_refresh(void)
@@ -580,6 +616,7 @@ static void failed(rq_kind_t kind, const char *error)
     case RQ_LOG:
         s_log_busy = false;
         strlcpy(s_log_error, error, sizeof(s_log_error));
+        log_answered();
         break;
     case RQ_APP:
         dl_fail(error);
@@ -637,6 +674,7 @@ void quests_on_mesh(const os_mesh_peer_t *from, cJSON *msg)
         s_log_busy = false;
         log_set(cJSON_GetObjectItemCaseSensitive(res, "q"), true);
         log_save();
+        log_answered();
         break;
     case RQ_APP:
         if (s_dl.state == QDL_RUNNING) {
@@ -695,12 +733,8 @@ static void cmd_status(void)
         static const char *const st[] = {"-", "running", "done", "failed"};
         printf("app %s: %s %d/%d %s\n", s_dl.id, st[s_dl.state], s_dl.off, s_dl.total, s_dl.error);
     }
-    for (int i = 0; i < s_nlog; i++) {
-        printf("  quest %s [%s] %s: %s @ %s\n", s_log[i].id, s_log[i].status, s_log[i].title, s_log[i].step,
-               s_log[i].at);
-    }
-    if (s_log_error[0]) {
-        printf("  log: %s\n", s_log_error);
+    if (s_log) {
+        print_log();
     }
 }
 
@@ -719,6 +753,12 @@ static void cmd_run(void *arg)
         quests_hangup();
     } else if (!strcmp(op, "log")) {
         quests_log_refresh();
+        print_log();                    // what's saved now; a fresh answer follows if one is on its way
+        if (s_log_busy) {
+            s_log_print = true;
+        } else {
+            log_release();
+        }
     } else {
         why = "usage: quest [status|talk <beacon>|choose <i>|bye|log]";
     }
