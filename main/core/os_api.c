@@ -14,6 +14,7 @@
 //
 // Portable: the emulator runs it over its fetch-based os_http.
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,8 +155,20 @@ void os_api_prewarm(void)
     }
 }
 
+void *os_api_token(void)
+{
+    // Odd values from 0xF0000001 up: no object lives there on the badge or
+    // in the wasm32 emulator, so a token never matches a real pointer.
+    static uint32_t s_next;
+    uint32_t n = __atomic_fetch_add(&s_next, 1, __ATOMIC_RELAXED);
+    return (void *)(uintptr_t)(0xF0000001u + 2u * (n % 0x07FFFFFFu));
+}
+
 void os_api_cancel(void *ctx)
 {
+    if (!ctx) {
+        return;                             // NULL is "nobody's": other modules use it too
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (req_t *r = s_reqs; r; r = r->next) {
         if (r->ctx == ctx) {
