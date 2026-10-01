@@ -168,6 +168,19 @@ void game_ascii(char *out, size_t n, const char *in)
     out[j] = 0;
 }
 
+void game_fmt_lamps(char *out, size_t n, int lamps)
+{
+    unsigned v = lamps < 0 ? -lamps : lamps;
+    const char *sign = lamps < 0 ? "-" : "";
+    if (v >= 1000000) {
+        snprintf(out, n, "%s%u,%03u,%03u", sign, v / 1000000, v / 1000 % 1000, v % 1000);
+    } else if (v >= 1000) {
+        snprintf(out, n, "%s%u,%03u", sign, v / 1000, v % 1000);
+    } else {
+        snprintf(out, n, "%s%u", sign, v);
+    }
+}
+
 void game_peer_label(const char *name, const char *id, char *out, size_t n)
 {
     if (name && name[0]) {

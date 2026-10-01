@@ -77,17 +77,6 @@ static trade_ui_t *s;
 static void render_trade(bool force);
 static void set_hint(void);
 
-static void fmt_lamps(char *out, size_t n, int lamps)
-{
-    if (lamps >= 1000000) {
-        snprintf(out, n, "%d,%03d,%03d", lamps / 1000000, lamps / 1000 % 1000, lamps % 1000);
-    } else if (lamps >= 1000) {
-        snprintf(out, n, "%d,%03d", lamps / 1000, lamps % 1000);
-    } else {
-        snprintf(out, n, "%d", lamps);
-    }
-}
-
 static int balance(void)
 {
     os_cloud_info_t *in = malloc(sizeof(*in));
@@ -388,7 +377,7 @@ static void bundle_text(const trade_bundle_t *b, char *out, size_t n)
     out[0] = 0;
     if (b->lamps) {
         char amt[16];
-        fmt_lamps(amt, sizeof(amt), b->lamps);
+        game_fmt_lamps(amt, sizeof(amt), b->lamps);
         len = snprintf(out, n, "%s !LAMPs", amt);
     }
     for (int i = 0; i < b->nitems + b->npages && len < n; i++) {
@@ -422,8 +411,8 @@ static void mine_row(int i, ui_row_t *r, void *ctx)
         break;
     case R_LAMPS: {
         char amt[16], bal[16];
-        fmt_lamps(amt, sizeof(amt), t->mine.lamps);
-        fmt_lamps(bal, sizeof(bal), balance());
+        game_fmt_lamps(amt, sizeof(amt), t->mine.lamps);
+        game_fmt_lamps(bal, sizeof(bal), balance());
         snprintf(r->title, sizeof(r->title), "%s !LAMPs", amt);
         r->title_color = COL_LAMPS;
         snprintf(r->sub, sizeof(r->sub), "You have %s !LAMPs", bal);
