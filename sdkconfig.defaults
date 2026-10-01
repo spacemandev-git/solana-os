@@ -7,9 +7,14 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 
+# The production badge server (deploy/: Cloud Run service bp26-badges, its
+# PUBLIC_URL), so a freshly flashed badge talks to it without a console
+# "server" command. "server <url>" still overrides it; "server clear" comes back.
+CONFIG_SOLANA_OS_SERVER_URL="https://bp26-badges-122982327899.us-central1.run.app"
+
 # App metadata shown in About / info
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="0.2.0"
+CONFIG_APP_PROJECT_VER="0.2.1"
 
 # FAT long file names
 CONFIG_FATFS_LFN_HEAP=y

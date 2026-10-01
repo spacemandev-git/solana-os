@@ -1,7 +1,9 @@
 // Shared widgets: labels, panels, hint bar, tabs, virtual list, keyboard.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "esp_random.h"
 #include "ui.h"
 #include "os.h"
 #include "os_api.h"
@@ -806,4 +808,147 @@ bool ui_offline_key(lv_obj_t *panel, os_key_t key)
     }
     ui_offline_update(panel);
     return true;
+}
+
+// ---- Confetti ----
+// One object draws every piece in its DRAW_MAIN event, rather than an object
+// per piece: a few hundred bytes instead of ~200 B a piece. Each frame
+// invalidates only the pieces' old + new rects (LVGL falls back to the whole
+// screen when there are more than its 32 invalid areas). Fixed point (1/16 px)
+// because the C5 has no FPU; the object owns its ~30 fps timer and frees it
+// on LV_EVENT_DELETE.
+
+#define FX_FP       16
+#define FX_FRAME_MS 33
+#define FX_FRAMES   100                 // hard stop after ~3.3 s
+#define FX_GRAVITY  5                   // 1/16 px per frame^2
+#define FX_FALL     40                  // flutter: terminal fall speed
+#define FX_SWAY     6                   // side-to-side drift while tumbling
+
+typedef struct {
+    int16_t x, y, vx, vy;               // 1/16 px, 1/16 px per frame
+    uint8_t spin, rate;                 // tumble phase (0..15) and speed
+    uint8_t size, col;                  // px; index into fx_cols
+    bool flat;                          // tumbles around the horizontal axis
+} fx_piece_t;
+
+typedef struct {
+    lv_timer_t *timer;
+    int n, frame;
+    fx_piece_t p[];
+} fx_t;
+
+static const uint32_t fx_cols[] = {
+    COL_PURPLE, COL_GREEN, COL_PINK, COL_LPURPLE, COL_BLUE, COL_AQUA, COL_LIME, COL_YELLOW, COL_ORANGE,
+};
+
+static int fx_rand(int lo, int hi)
+{
+    return lo + (int)(esp_random() % (uint32_t)(hi - lo + 1));
+}
+
+// The piece's rect in screen coordinates: one side shrinks and grows with
+// the tumble phase, so flat squares look like they flip in the air.
+static void fx_area(const lv_area_t *box, const fx_piece_t *q, lv_area_t *a)
+{
+    int t = q->spin < 8 ? q->spin : 15 - q->spin;
+    int thin = 1 + t * (q->size - 1) / 7;
+    a->x1 = box->x1 + q->x / FX_FP;
+    a->y1 = box->y1 + q->y / FX_FP;
+    a->x2 = a->x1 + (q->flat ? q->size : thin) - 1;
+    a->y2 = a->y1 + (q->flat ? thin : q->size) - 1;
+}
+
+static void fx_draw(lv_event_t *e)
+{
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    fx_t *fx = lv_obj_get_user_data(obj);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t box;
+    lv_obj_get_coords(obj, &box);
+    lv_draw_fill_dsc_t d;
+    lv_draw_fill_dsc_init(&d);
+    d.opa = LV_OPA_COVER;
+    for (int i = 0; i < fx->n; i++) {
+        lv_area_t a;
+        fx_area(&box, &fx->p[i], &a);
+        d.color = ui_col(fx_cols[fx->p[i].col]);
+        lv_draw_fill(layer, &d, &a);
+    }
+}
+
+static void fx_deleted(lv_event_t *e)
+{
+    fx_t *fx = lv_obj_get_user_data(lv_event_get_target_obj(e));
+    lv_timer_delete(fx->timer);
+    free(fx);
+}
+
+static void fx_frame(lv_timer_t *t)
+{
+    lv_obj_t *obj = lv_timer_get_user_data(t);
+    fx_t *fx = lv_obj_get_user_data(obj);
+    lv_area_t box;
+    lv_obj_get_coords(obj, &box);
+    int h = lv_area_get_height(&box);
+    for (int i = 0; i < fx->n;) {
+        fx_piece_t *q = &fx->p[i];
+        lv_area_t old, now;
+        fx_area(&box, q, &old);
+        q->vy = q->vy + FX_GRAVITY > FX_FALL ? FX_FALL : q->vy + FX_GRAVITY;
+        q->vx -= q->vx / 16;            // air drag
+        q->x += q->vx + (q->spin < 8 ? FX_SWAY : -FX_SWAY);
+        q->y += q->vy;
+        q->spin = (q->spin + q->rate) & 15;
+        fx_area(&box, q, &now);
+        lv_area_t both = {
+            LV_MIN(old.x1, now.x1), LV_MIN(old.y1, now.y1), LV_MAX(old.x2, now.x2), LV_MAX(old.y2, now.y2),
+        };
+        lv_obj_invalidate_area(obj, &both);
+        if (q->y / FX_FP >= h) {
+            fx->p[i] = fx->p[--fx->n];  // fell out of view
+        } else {
+            i++;
+        }
+    }
+    if (!fx->n || ++fx->frame >= FX_FRAMES) {
+        lv_obj_delete(obj);             // fx_deleted stops this timer
+    }
+}
+
+void ui_confetti(lv_obj_t *parent, int x, int y, int count)
+{
+    count = LV_CLAMP(1, count, UI_CONFETTI_MAX);
+    fx_t *fx = calloc(1, sizeof(*fx) + count * sizeof(fx_piece_t));
+    if (!fx) {
+        return;
+    }
+    lv_obj_t *obj = lv_obj_create(parent);
+    lv_obj_remove_style_all(obj);
+    lv_obj_set_size(obj, lv_pct(100), lv_pct(100));
+    lv_obj_set_scrollable(obj, false);
+    lv_obj_set_user_data(obj, fx);
+    fx->timer = lv_timer_create(fx_frame, FX_FRAME_MS, obj);
+    if (!fx->timer) {
+        free(fx);
+        lv_obj_delete(obj);
+        return;
+    }
+    lv_obj_add_event_cb(obj, fx_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(obj, fx_deleted, LV_EVENT_DELETE, NULL);
+
+    // A fan upwards: 1.5-7 px/frame up, up to 4.5 px/frame sideways.
+    fx->n = count;
+    for (int i = 0; i < count; i++) {
+        fx_piece_t *q = &fx->p[i];
+        q->x = (int16_t)((x + fx_rand(-6, 6)) * FX_FP);
+        q->y = (int16_t)((y + fx_rand(-4, 4)) * FX_FP);
+        q->vx = (int16_t)fx_rand(-72, 72);
+        q->vy = (int16_t)-fx_rand(24, 112);
+        q->spin = (uint8_t)fx_rand(0, 15);
+        q->rate = (uint8_t)fx_rand(1, 2);
+        q->size = (uint8_t)fx_rand(4, 7);
+        q->col = (uint8_t)(i % (int)(sizeof(fx_cols) / sizeof(fx_cols[0])));
+        q->flat = i & 1;
+    }
 }

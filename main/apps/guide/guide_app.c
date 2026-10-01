@@ -3,8 +3,8 @@
 //
 // Collection: categories with owned/total -> the pages of one category
 // (locked ones read "???") -> a page reader. Packs: SELECT opens one and
-// reveals its pages one card at a time, with an LED flash in the rarity
-// colour. Shop: buy packs with !LAMPs.
+// reveals its pages one card at a time, with confetti (more for rarer pages)
+// and an LED flash in the rarity colour. Shop: buy packs with !LAMPs.
 //
 // Every list shows the last good server answer from /sdcard/hh/cache/ first
 // ("synced 5 min ago") and refreshes when online. Page bodies are fetched
@@ -30,6 +30,7 @@
 #define REVEAL_MAX  10
 #define BODY_MAX    1600
 #define SCROLL_STEP 40
+#define POP         34          // confetti when the pack pops (its first card)
 
 enum { TAB_COLLECTION, TAB_PACKS, TAB_SHOP, TAB_COUNT };
 static const char *const tab_names[TAB_COUNT] = {"Collection", "Packs", "Shop"};
@@ -591,6 +592,9 @@ static void reveal_show(void)
     lv_label_set_text_fmt(foot, "%d of %d", s->shown + 1, s->ncards);
     lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -4);
 
+    static const uint8_t burst[] = {14, 22, 34, UI_CONFETTI_MAX};
+    int n = burst[p->rarity];
+    ui_confetti(v, OS_ROOT_W / 2, VIEW_H / 2, s->shown == 0 && n < POP ? POP : n);
     if (p->rarity == R_LEGENDARY) {
         game_led_sweep();
     } else {

@@ -113,3 +113,11 @@ ui_net_t ui_offline_update(lv_obj_t *panel);
 // SELECT while the panel shows: turn Wi-Fi on, retry, or open Wi-Fi / My
 // Badge. Returns true if it used the key (only SELECT, only while it shows).
 bool ui_offline_key(lv_obj_t *panel, os_key_t key);
+
+// ---- Confetti ----
+// A burst of brand-coloured confetti over `parent`: up to UI_CONFETTI_MAX
+// pieces fly up from (x, y) (parent coordinates), tumble and flutter down out
+// of view, then the effect deletes itself. Create it after the content it
+// covers. Deleting the parent (or leaving the app) stops it.
+void ui_confetti(lv_obj_t *parent, int x, int y, int count);
+#define UI_CONFETTI_MAX 48

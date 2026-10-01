@@ -1,6 +1,7 @@
 // My Badge: this badge's identity on the server (core/os_cloud). While the
 // badge is unclaimed it shows a QR code of the claim link, so the owner can
-// scan it with a phone and link the badge to their account. Once claimed it
+// scan it with a phone and link the badge to their account (or type its ID
+// and claim code into <host>/claim). Once claimed it
 // shows the owner, !LAMPs, Level, pages and unopened packs.
 //
 // The cloud task does the hello; this app renders snapshots of
@@ -54,6 +55,31 @@ static void host_of(const char *url, char *out, size_t n)
     const char *p = strstr(url, "://");
     p = p ? p + 3 : url;
     size_t len = strcspn(p, "/?#");
+    snprintf(out, n, "%.*s", (int)(len < n ? len : n - 1), p);
+}
+
+// The claim link's code ("...&c=ABCD2345"), shown as "ABCD-2345" for typing.
+static void claim_code(const char *url, char *out, size_t n)
+{
+    const char *q = strchr(url, '?');
+    const char *c = q ? strstr(q, "c=") : NULL;
+    while (c && c[-1] != '?' && c[-1] != '&') {
+        c = strstr(c + 1, "c=");
+    }
+    size_t len = c ? strcspn(c + 2, "&#") : 0;
+    if (len == 8) {
+        snprintf(out, n, "%.4s-%.4s", c + 2, c + 6);
+    } else {
+        snprintf(out, n, "%.*s", (int)(len < n ? len : n - 1), c ? c + 2 : "");
+    }
+}
+
+// "https://host/claim?b=..." -> "host/claim"
+static void claim_page(const char *url, char *out, size_t n)
+{
+    const char *p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    size_t len = strcspn(p, "?#");
     snprintf(out, n, "%.*s", (int)(len < n ? len : n - 1), p);
 }
 
@@ -258,16 +284,33 @@ static void build_unclaimed(const os_cloud_info_t *in)
         lv_obj_center(qr);
     }
 
+    // The ID and claim code are also typed in by hand at <host>/claim, for a
+    // phone that can't scan the code.
+    char code[16], url[96], line[128];
+    claim_code(in->claim_url, code, sizeof(code));
+    claim_page(in->claim_url, url, sizeof(url));
     int y = (CONTENT_H - QR_BOX) / 2 + 2;
     label_at(s_view, &sol_mono_12, COL_DIM, "BADGE ID", COL_X, y, 0);
-    lv_obj_t *id = label_at(s_view, &sol_font_32, COL_TEXT, in->id, COL_X, y + 14, 0);
+    lv_obj_t *id = label_at(s_view, &sol_font_32, COL_TEXT, in->id, COL_X, y + 12, 0);
     lv_obj_update_layout(id);
     if (lv_obj_get_width(id) > COL_W) {
         lv_obj_set_style_text_font(id, &sol_font_20, 0);
     }
-    ui_gradient_bar(s_view, COL_X, y + 58, COL_W, 3);
-    label_at(s_view, &sol_font_20, COL_TEXT, "Scan to link\nyour badge", COL_X, y + 72, COL_W);
-    label_at(s_view, &sol_mono_12, COL_DIM, "Open it on your phone and sign in with your wallet.", COL_X, y + 124, COL_W);
+    label_at(s_view, &sol_mono_12, COL_DIM, "CLAIM CODE", COL_X, y + 48, 0);
+    lv_obj_t *c = label_at(s_view, &sol_font_20, COL_TEXT, code, COL_X, y + 61, 0);
+    lv_obj_update_layout(c);
+    if (lv_obj_get_width(c) > COL_W) {
+        lv_obj_set_style_text_font(c, &sol_font_14, 0);
+    }
+    ui_gradient_bar(s_view, COL_X, y + 89, COL_W, 3);
+    label_at(s_view, &sol_font_14, COL_TEXT, "Scan to link", COL_X, y + 98, COL_W);
+    snprintf(line, sizeof(line), "or enter both at %s", url);
+    lv_obj_t *how = label_at(s_view, &sol_mono_12, COL_DIM, line, COL_X, y + 117, COL_W);
+    // A long host (a run.app URL) can run past the bottom: drop the lead-in.
+    lv_obj_update_layout(how);
+    if (lv_obj_get_y(how) + lv_obj_get_height(how) > CONTENT_H) {
+        lv_label_set_text(how, url);
+    }
 }
 
 static void tile(int i, const char *value, const char *name, uint32_t color)
