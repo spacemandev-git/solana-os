@@ -392,7 +392,9 @@ static void log_set(const cJSON *arr, bool compact)
             game_ascii(e->title, sizeof(e->title), game_jstr(q, "title"));
             game_ascii(e->status, sizeof(e->status), game_jstr(q, "status"));
             game_ascii(e->step, sizeof(e->step), game_jstr(step, "title"));
-            game_ascii(e->at, sizeof(e->at), game_jstr(step, "at"));
+            // Where to go: the current step's character, else the quest giver.
+            const char *at = game_jstr(step, "at");
+            game_ascii(e->at, sizeof(e->at), at[0] ? at : game_jstr(cJSON_GetObjectItemCaseSensitive(q, "giver"), "name"));
         }
     }
     free(s_log);

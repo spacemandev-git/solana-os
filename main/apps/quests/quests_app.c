@@ -74,8 +74,12 @@ static void row(int i, ui_row_t *r, void *ctx)
         lv_snprintf(r->sub, sizeof(r->sub), "%s%s%s", e->step, e->at[0] ? " @ " : "", e->at);
     } else if (!strcmp(e->status, "locked")) {
         strlcpy(r->sub, "Finish other quests first", sizeof(r->sub));
+    } else if (!strcmp(e->status, "completed")) {
+        strlcpy(r->sub, "Done", sizeof(r->sub));
+    } else if (e->at[0]) {
+        lv_snprintf(r->sub, sizeof(r->sub), "Talk to %s to start", e->at);
     } else {
-        strlcpy(r->sub, !strcmp(e->status, "completed") ? "Done" : "Talk to its character to start", sizeof(r->sub));
+        strlcpy(r->sub, "Talk to its character to start", sizeof(r->sub));
     }
     strlcpy(r->right, e->status, sizeof(r->right));
     r->right_color = status_color(e->status);
