@@ -50,6 +50,7 @@ static char *s_dl_manifest;
 static quest_entry_t *s_log;
 static int s_nlog;
 static int64_t s_log_at;
+static bool s_log_saved;
 static bool s_log_busy;
 static char s_log_error[48];
 
@@ -391,7 +392,9 @@ static void log_set(const cJSON *arr, bool compact)
             game_ascii(e->title, sizeof(e->title), game_jstr(q, "title"));
             game_ascii(e->status, sizeof(e->status), game_jstr(q, "status"));
             game_ascii(e->step, sizeof(e->step), game_jstr(step, "title"));
-            game_ascii(e->at, sizeof(e->at), game_jstr(step, "at"));
+            // Where to go: the current step's character, else the quest giver.
+            const char *at = game_jstr(step, "at");
+            game_ascii(e->at, sizeof(e->at), at[0] ? at : game_jstr(cJSON_GetObjectItemCaseSensitive(q, "giver"), "name"));
         }
     }
     free(s_log);
@@ -420,6 +423,7 @@ static void log_save(void)
     }
     cJSON_free(body);
     s_log_at = os_cloud_time_ms();
+    s_log_saved = false;
 }
 
 static void log_from_cache(void)
@@ -429,6 +433,7 @@ static void log_from_cache(void)
     if (body) {
         log_set(cJSON_GetObjectItemCaseSensitive(body, "q"), true);
         s_log_at = at;
+        s_log_saved = true;
     }
     cJSON_Delete(body);
 }
@@ -460,7 +465,7 @@ void quests_log_refresh(void)
     }
     s_log_error[0] = 0;
     if (os_api_online()) {
-        if (os_api_call("GET", "/api/device/quests", NULL, 0, on_log_api, NULL) == ESP_OK) {
+        if (os_api_call("GET", "/api/device/quests", NULL, 0, on_log_api, &s_log_busy) == ESP_OK) {
             s_log_busy = true;
         }
         return;
@@ -492,6 +497,11 @@ int quests_log(const quest_entry_t **out)
     return s_nlog;
 }
 
+bool quests_log_saved(void)
+{
+    return s_log_saved;
+}
+
 int64_t quests_log_at(void)
 {
     return s_log_at;
@@ -504,6 +514,11 @@ const char *quests_log_error(void)
 
 void quests_log_free(void)
 {
+    os_api_cancel(&s_log_busy);
+    if (s_rq.kind == RQ_LOG) {
+        s_rq.kind = RQ_NONE;            // a late answer is ignored
+    }
+    s_log_busy = false;
     free(s_log);
     s_log = NULL;
     s_nlog = 0;

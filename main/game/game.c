@@ -9,6 +9,7 @@
 #include "core/os.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
+#include "core/ui.h"
 #include "game.h"
 
 static const char *TAG = "game";
@@ -168,19 +169,6 @@ void game_ascii(char *out, size_t n, const char *in)
     out[j] = 0;
 }
 
-void game_fmt_lamps(char *out, size_t n, int lamps)
-{
-    unsigned v = lamps < 0 ? -lamps : lamps;
-    const char *sign = lamps < 0 ? "-" : "";
-    if (v >= 1000000) {
-        snprintf(out, n, "%s%u,%03u,%03u", sign, v / 1000000, v / 1000 % 1000, v % 1000);
-    } else if (v >= 1000) {
-        snprintf(out, n, "%s%u,%03u", sign, v / 1000, v % 1000);
-    } else {
-        snprintf(out, n, "%s%u", sign, v);
-    }
-}
-
 void game_peer_label(const char *name, const char *id, char *out, size_t n)
 {
     if (name && name[0]) {
@@ -260,16 +248,8 @@ void game_synced(int64_t at_ms, char *out, size_t n)
         strlcpy(out, "saved copy", n);
         return;
     }
-    int min = (int)((now - at_ms) / 60000);
-    if (min < 1) {
-        strlcpy(out, "synced just now", n);
-    } else if (min < 60) {
-        snprintf(out, n, "synced %d min ago", min);
-    } else if (min < 48 * 60) {
-        snprintf(out, n, "synced %d h ago", min / 60);
-    } else {
-        snprintf(out, n, "synced %d days ago", min / (24 * 60));
-    }
+    char ago[24];
+    snprintf(out, n, "synced %s", ui_fmt_ago(ago, sizeof(ago), now - at_ms));
 }
 
 // ---------------------------------------------------------------------------
