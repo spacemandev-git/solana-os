@@ -312,7 +312,9 @@ static void outcome(const char *body, bool toast)
         if (s_t && !strcmp(s_t->v.tid, tid)) {
             s_t->v.settled = status[0] == 's';
             s_t->v.rejected = !s_t->v.settled;
-            strlcpy(s_t->v.reason, reason, sizeof(s_t->v.reason));
+            if (!s_t->v.unconfirmed) {
+                strlcpy(s_t->v.reason, reason, sizeof(s_t->v.reason));   // keep why it was left open
+            }
         }
         if (toast) {
             if (status[0] == 's') {

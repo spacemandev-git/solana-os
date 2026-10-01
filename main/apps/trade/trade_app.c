@@ -625,7 +625,12 @@ static void render_trade(bool force)
         if (t->unconfirmed) {
             // We signed, so the server may still settle it: Trades shows the outcome.
             lv_label_set_text(s->theirs_head, "SIGNED, NOT CONFIRMED");
-            snprintf(text, sizeof(text), "%s. It may still settle; Trades shows the outcome.", t->reason);
+            if (t->settled || t->rejected) {
+                snprintf(text, sizeof(text), "%s. The server %s it after all.", t->reason,
+                         t->settled ? "settled" : "rejected");
+            } else {
+                snprintf(text, sizeof(text), "%s. It may still settle; Trades shows the outcome.", t->reason);
+            }
         } else {
             lv_label_set_text(s->theirs_head, "CANCELLED");
             strlcpy(text, t->reason, sizeof(text));
