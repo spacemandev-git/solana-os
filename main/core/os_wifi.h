@@ -50,8 +50,11 @@ void os_wifi_set_enabled(bool on);
 bool os_wifi_enabled(void);
 
 // Join a network (turns Wi-Fi on). Credentials are saved to NVS once the
-// connection gets an IP.
+// connection gets an IP. An AP of the SSID on the mesh channel is preferred
+// (online and on the mesh at once), else the strongest one anywhere.
 esp_err_t os_wifi_connect(const char *ssid, const char *pass);
+// Same, preferring an AP on `channel` (the band row the user picked; 0 = as above).
+esp_err_t os_wifi_connect_ch(const char *ssid, const char *pass, int channel);
 void os_wifi_forget(void);              // also turns Wi-Fi off
 
 // Channel the radio waits on while no network is joined (os_mesh sets the

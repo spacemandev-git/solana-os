@@ -38,9 +38,9 @@ static const char *TAG = "os_mesh";
 #define REASM_MS        2000            // incomplete messages are dropped after 2 s
 #define DEDUP_N         32
 #define DEDUP_MS        10000
-#define PEER_MAX        24
+#define PEER_MAX        20
 #define SUB_MAX         12
-#define RXQ_LEN         8
+#define RXQ_LEN         6
 #define HELLO_MS        1500            // + 0..1000 ms jitter
 #define MAINTAIN_MS     250
 #define SYNC_MS         1000            // identity and channel from os_cloud
@@ -300,33 +300,40 @@ static os_mesh_peer_t *find_peer_locked(const char *id)
     return NULL;
 }
 
-// The entry for id, creating it (evicting the longest silent one) if needed.
-static os_mesh_peer_t *peer_slot_locked(const char *id, bool *created)
+static bool live(const os_mesh_peer_t *p, int64_t now)
+{
+    return p->id[0] && p->last_ms && now - p->last_ms < OS_MESH_PEER_TTL_MS;
+}
+
+// The entry for id, creating it if needed. A full table (a crowded hall)
+// gives up a silent entry first, else its weakest peer if the newcomer is
+// stronger: "nearby" means close. NULL when the newcomer loses.
+static os_mesh_peer_t *peer_slot_locked(const char *id, int rssi, bool *created)
 {
     os_mesh_peer_t *p = find_peer_locked(id);
     *created = false;
     if (p) {
         return p;
     }
-    p = &s_peers[0];
-    for (int i = 0; i < PEER_MAX; i++) {
-        if (!s_peers[i].id[0]) {
-            p = &s_peers[i];
-            break;
-        }
-        if (s_peers[i].last_ms < p->last_ms) {
-            p = &s_peers[i];
+    int64_t now = now_ms();
+    os_mesh_peer_t *silent = NULL, *weak = NULL;
+    for (int i = 0; i < PEER_MAX && !p; i++) {
+        os_mesh_peer_t *q = &s_peers[i];
+        if (!q->id[0]) {
+            p = q;
+        } else if (!live(q, now)) {
+            silent = !silent || q->last_ms < silent->last_ms ? q : silent;
+        } else if (!weak || q->rssi < weak->rssi) {
+            weak = q;
         }
     }
-    memset(p, 0, sizeof(*p));
-    strlcpy(p->id, id, sizeof(p->id));
-    *created = true;
+    p = p ? p : silent ? silent : weak && weak->rssi < rssi ? weak : NULL;
+    if (p) {
+        memset(p, 0, sizeof(*p));
+        strlcpy(p->id, id, sizeof(p->id));
+        *created = true;
+    }
     return p;
-}
-
-static bool live(const os_mesh_peer_t *p, int64_t now)
-{
-    return p->id[0] && p->last_ms && now - p->last_ms < OS_MESH_PEER_TTL_MS;
 }
 
 static int by_rssi(const void *a, const void *b)
@@ -652,7 +659,12 @@ static void on_hello(const os_mesh_peer_t *heard, const char *json, int64_t now)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool created;
-    os_mesh_peer_t *p = peer_slot_locked(heard->id, &created);
+    os_mesh_peer_t *p = peer_slot_locked(heard->id, heard->rssi, &created);
+    if (!p) {
+        xSemaphoreGive(s_lock);
+        cJSON_Delete(j);
+        return;                             // table full of closer peers
+    }
     bool fresh = created || !live(p, now);
     memcpy(p->mac, heard->mac, 6);
     p->rssi = heard->rssi;
@@ -731,13 +743,20 @@ static void deliver(uint8_t type, const uint8_t *mac, const char *src, int rssi,
     // without a HELLO time: they can be answered but are not listed.
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool created;
-    os_mesh_peer_t *p = peer_slot_locked(src, &created);
-    memcpy(p->mac, mac, 6);
-    p->rssi = rssi;
-    if (created) {
-        p->kind = type == OS_MESH_RELAY_RESP ? OS_PEER_BEACON : OS_PEER_BADGE;
+    os_mesh_peer_t *p = peer_slot_locked(src, rssi, &created);
+    if (p) {
+        memcpy(p->mac, mac, 6);
+        p->rssi = rssi;
+        if (created) {
+            p->kind = type == OS_MESH_RELAY_RESP ? OS_PEER_BEACON : OS_PEER_BADGE;
+        }
+        from = *p;
+    } else {
+        strlcpy(from.id, src, sizeof(from.id));
+        memcpy(from.mac, mac, 6);
+        from.rssi = rssi;
+        from.kind = type == OS_MESH_RELAY_RESP ? OS_PEER_BEACON : OS_PEER_BADGE;
     }
-    from = *p;
     xSemaphoreGive(s_lock);
 
     if (type == OS_MESH_HELLO) {
@@ -1061,7 +1080,7 @@ void os_mesh_init(void)
     os_radio_mac(s_mac);
     os_cmd_register("mesh", "mesh [status|peers|selftest|log on|off|acquire|release|send <type> <id|*> <json>]",
                     cmd_mesh);
-    xTaskCreate(mesh_task, "mesh", 4608, NULL, 3, &s_task);
+    xTaskCreate(mesh_task, "mesh", 4096, NULL, 3, &s_task);
     esp_err_t err = os_radio_init(on_rx);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "radio unavailable: %s", esp_err_to_name(err));

@@ -2,6 +2,11 @@
 // while the user has Wi-Fi on (off at every boot), auto reconnect, async
 // scans, suspend/resume for apps that need the radio, and the park channel
 // the radio returns to whenever no network is joined (ESP-NOW listens there).
+//
+// Venue networks are one SSID on many APs and both bands. A join first scans
+// the mesh channel (or the channel of the row the user picked) for the SSID
+// and pins that AP: on the mesh channel the badge is online and on the mesh
+// at once, with no suspend. Without one it joins the strongest AP anywhere.
 
 #include <string.h>
 #include <stdlib.h>
@@ -25,7 +30,12 @@ static SemaphoreHandle_t s_lock;
 static os_wifi_state_t s_state = OS_WIFI_IDLE;
 static char s_ssid[33], s_pass[65], s_ip[16];
 static bool s_save_on_ip, s_suspended, s_started, s_enabled, s_scanning;
-static int s_retries, s_park;
+static bool s_join_scan;        // the one-channel scan before a join is running
+static bool s_join_pending;     // a join waits for the app's scan to finish
+static bool s_pinned;           // the STA config names one AP (BSSID + channel)
+static int s_retries, s_park, s_want_ch;
+static wifi_ap_record_t *s_scan_cache;  // the app's scan, read at SCAN_DONE
+static uint16_t s_scan_n;
 static const char *s_fail;
 static volatile bool s_scan_done;
 
@@ -87,7 +97,9 @@ static const char *reason_str(int reason)
     }
 }
 
-static void start_connect_locked(void)
+// Connect to one AP (pinned BSSID and channel) or, with ap NULL, to the
+// strongest AP of the SSID on any channel.
+static void join_locked(const wifi_ap_record_t *ap)
 {
     wifi_config_t cfg = {0};
     strlcpy((char *)cfg.sta.ssid, s_ssid, sizeof(cfg.sta.ssid));
@@ -95,20 +107,75 @@ static void start_connect_locked(void)
     cfg.sta.threshold.authmode = s_pass[0] ? WIFI_AUTH_WEP : WIFI_AUTH_OPEN;
     cfg.sta.pmf_cfg.capable = true;
     cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-    cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    if (ap) {
+        cfg.sta.bssid_set = true;
+        memcpy(cfg.sta.bssid, ap->bssid, sizeof(cfg.sta.bssid));
+        cfg.sta.channel = ap->primary;
+        cfg.sta.scan_method = WIFI_FAST_SCAN;
+        ESP_LOGI(TAG, "joining '%s' on ch %d (%d dBm)", s_ssid, ap->primary, ap->rssi);
+    } else {
+        cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    }
+    s_pinned = ap != NULL;
     esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    esp_wifi_connect();
+}
+
+// Look for the SSID on the wanted channel first (the row the user picked,
+// else the mesh channel); SCAN_DONE then joins.
+static void start_connect_locked(void)
+{
     s_state = OS_WIFI_CONNECTING;
     s_ip[0] = 0;
     s_fail = NULL;
-    esp_wifi_connect();
+    int ch = s_want_ch ? s_want_ch : s_park;
+    if (!ch) {
+        join_locked(NULL);
+        return;
+    }
+    if (s_scanning) {
+        s_join_pending = true;      // the app's scan finishes first
+        return;
+    }
+    wifi_scan_config_t sc = {
+        .ssid = (uint8_t *)s_ssid,
+        .channel = ch,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active = { .min = 40, .max = 120 },
+    };
+    if (esp_wifi_scan_start(&sc, false) == ESP_OK) {
+        s_join_scan = true;
+    } else {
+        join_locked(NULL);
+    }
+}
+
+// SCAN_DONE of a join scan: the strongest AP of the SSID on that channel.
+static void join_scan_done_locked(void)
+{
+    static wifi_ap_record_t recs[4];        // the event task's stack is small
+    uint16_t n = sizeof(recs) / sizeof(recs[0]);
+    s_join_scan = false;
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) {
+        n = 0;
+    }
+    const wifi_ap_record_t *best = NULL;
+    for (int i = 0; i < n; i++) {
+        if (!strcmp((const char *)recs[i].ssid, s_ssid) && (!best || recs[i].rssi > best->rssi)) {
+            best = &recs[i];
+        }
+    }
+    if (s_enabled && !s_suspended && s_state == OS_WIFI_CONNECTING) {
+        join_locked(best);
+    }
 }
 
 // Not joined, not joining, not scanning and not lent out: tune the radio to
 // the park channel. The driver refuses channel changes in the other states.
 static void park_locked(void)
 {
-    if (!s_started || !s_park || s_suspended || s_scanning || s_state == OS_WIFI_CONNECTING ||
+    if (!s_started || !s_park || s_suspended || s_scanning || s_join_scan || s_state == OS_WIFI_CONNECTING ||
             s_state == OS_WIFI_CONNECTED) {
         return;
     }
@@ -138,10 +205,16 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                 s_state = OS_WIFI_IDLE;
                 park_locked();
             }
+        } else if (s_join_scan || s_join_pending) {
+            // Dropping the old network before a new join: the scan connects.
         } else if (s_retries++ < MAX_RETRIES) {
             ESP_LOGW(TAG, "disconnected (reason %d), retry %d", d->reason, s_retries);
             s_state = OS_WIFI_CONNECTING;
-            esp_wifi_connect();
+            if (s_pinned && s_retries > 1) {
+                join_locked(NULL);          // the pinned AP keeps failing: any AP will do
+            } else {
+                esp_wifi_connect();
+            }
         } else {
             s_fail = reason_str(d->reason);
             s_state = OS_WIFI_FAILED;
@@ -150,8 +223,26 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             park_locked();
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
-        s_scan_done = true;
-        s_scanning = false;
+        if (s_join_scan) {
+            join_scan_done_locked();
+        } else if (s_scanning) {
+            // Read the app's results now: a join scan may follow and would
+            // replace them before the app asks.
+            free(s_scan_cache);
+            s_scan_n = SCAN_MAX;
+            s_scan_cache = malloc(SCAN_MAX * sizeof(wifi_ap_record_t));
+            if (!s_scan_cache || esp_wifi_scan_get_ap_records(&s_scan_n, s_scan_cache) != ESP_OK) {
+                s_scan_n = 0;
+            }
+            s_scan_done = true;
+            s_scanning = false;
+            if (s_join_pending) {
+                s_join_pending = false;
+                if (s_enabled && !s_suspended) {
+                    start_connect_locked();
+                }
+            }
+        }
         park_locked();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
@@ -217,7 +308,9 @@ void os_wifi_get_info(os_wifi_info_t *out)
 
 esp_err_t os_wifi_scan_start(void)
 {
-    if (s_suspended) {
+    LOCK();
+    if (s_suspended || s_join_scan || s_scanning) {
+        UNLOCK();
         return ESP_ERR_INVALID_STATE;
     }
     s_scan_done = false;
@@ -228,6 +321,7 @@ esp_err_t os_wifi_scan_start(void)
         s_scanning = false;
         ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
     }
+    UNLOCK();
     return err;
 }
 
@@ -243,20 +337,33 @@ static int by_rssi(const void *a, const void *b)
 
 int os_wifi_scan_results(wifi_ap_record_t *out, int max)
 {
-    uint16_t n = max;
-    if (esp_wifi_scan_get_ap_records(&n, out) != ESP_OK) {
-        return 0;
+    LOCK();
+    int n = s_scan_n < max ? s_scan_n : max;
+    if (s_scan_cache) {
+        memcpy(out, s_scan_cache, n * sizeof(*out));
+    } else {
+        n = 0;
     }
+    free(s_scan_cache);
+    s_scan_cache = NULL;
+    s_scan_n = 0;
+    UNLOCK();
     qsort(out, n, sizeof(*out), by_rssi);
     return n;
 }
 
 esp_err_t os_wifi_connect(const char *ssid, const char *pass)
 {
+    return os_wifi_connect_ch(ssid, pass, 0);
+}
+
+esp_err_t os_wifi_connect_ch(const char *ssid, const char *pass, int channel)
+{
     if (!ssid || !ssid[0]) {
         return ESP_ERR_INVALID_ARG;
     }
     LOCK();
+    s_want_ch = channel;
     char saved[33] = "";
     os_wifi_saved_ssid(saved, sizeof(saved));
     strlcpy(s_ssid, ssid, sizeof(s_ssid));
@@ -302,7 +409,7 @@ void os_wifi_suspend(void)
     s_suspended = true;
     s_state = OS_WIFI_SUSPENDED;
     s_ip[0] = 0;
-    s_scanning = false;
+    s_scanning = s_join_pending = false;
     UNLOCK();
     esp_wifi_scan_stop();
     esp_wifi_disconnect();
@@ -336,6 +443,7 @@ void os_wifi_set_enabled(bool on)
     bool was = s_enabled;
     s_enabled = false;
     s_save_on_ip = false;
+    s_join_pending = false;
     if (!s_suspended) {
         s_state = OS_WIFI_IDLE;
         s_ip[0] = 0;

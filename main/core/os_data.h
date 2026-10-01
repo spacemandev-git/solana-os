@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "bsp.h"
 
 #define OS_DATA_DIR     BSP_SD_MOUNT "/hh"
@@ -29,3 +30,7 @@ bool os_data_remove(const char *rel);                       // file or directory
 
 // Delete everything under OS_DATA_DIR (factory reset, owner change). Blocking.
 void os_data_wipe(void);
+
+// Bumped by every os_data_wipe(). Services that keep SD data in RAM (X Dex
+// cards, quest state) compare it to drop their copy after an owner change.
+uint32_t os_data_epoch(void);
