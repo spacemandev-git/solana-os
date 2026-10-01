@@ -463,7 +463,7 @@ void quests_log_refresh(void)
     }
     s_log_error[0] = 0;
     if (os_api_online()) {
-        if (os_api_call("GET", "/api/device/quests", NULL, 0, on_log_api, NULL) == ESP_OK) {
+        if (os_api_call("GET", "/api/device/quests", NULL, 0, on_log_api, &s_log_busy) == ESP_OK) {
             s_log_busy = true;
         }
         return;
@@ -512,6 +512,11 @@ const char *quests_log_error(void)
 
 void quests_log_free(void)
 {
+    os_api_cancel(&s_log_busy);
+    if (s_rq.kind == RQ_LOG) {
+        s_rq.kind = RQ_NONE;            // a late answer is ignored
+    }
+    s_log_busy = false;
     free(s_log);
     s_log = NULL;
     s_nlog = 0;
