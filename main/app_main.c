@@ -11,6 +11,7 @@
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
 #include "core/console.h"
+#include "game/game.h"
 
 static const char *TAG = "solana_os";
 
@@ -61,6 +62,7 @@ void app_main(void)
     }
     os_cloud_init();
     os_mesh_init();
+    game_init();
     boot_sweep();
 
     console_start();
