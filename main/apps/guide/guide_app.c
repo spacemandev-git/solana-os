@@ -294,6 +294,7 @@ static void pages_open(int cat)
         os_toast("Out of memory");
         return;
     }
+    ui_list_set_count(s->list, 0);      // the rows are categories until the pages render
     s->mode = V_PAGES;
     s->cat = cat;
     s->npages = 0;
@@ -303,7 +304,6 @@ static void pages_open(int cat)
     cJSON *j = game_cache_get(name, &s->pages_at);
     pages_add(cJSON_GetObjectItemCaseSensitive(j, "items"));
     cJSON_Delete(j);
-    ui_list_select(s->list, 0);
     if (os_api_online()) {
         pages_more();
     }
@@ -887,7 +887,7 @@ static void show_tab(int tab)
 {
     s->tab = tab;
     ui_tabs_select(s->tabs, tab);
-    ui_list_select(s->list, 0);
+    ui_list_set_count(s->list, 0);      // the rows belong to the other tab until it renders
     tab_render();
 }
 

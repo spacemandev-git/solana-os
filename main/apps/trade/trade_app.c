@@ -178,7 +178,7 @@ static void show_tab(int tab)
 {
     s->tab = tab;
     ui_tabs_select(s->tabs, tab);
-    ui_list_select(s->list, 0);
+    ui_list_set_count(s->list, 0);      // the rows belong to the other tab until it reloads
     if (tab == TAB_NEARBY) {
         ui_list_set_empty(s->list, !game_claimed() ? "Not linked yet: claim this badge first"
                                    : !s->acquired ? "Loading your items and pages, then looking for badges..."
