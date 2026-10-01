@@ -3,9 +3,14 @@
 // A invites, B joins. Both send offers (each edit is a new revision) and lock
 // once happy with a pair of revisions; a lock only counts while both
 // revisions are current, so any new offer clears both. When both locks hold,
-// A builds the canonical terms and signs them, B rebuilds the terms from the
-// offers it saw, checks they match and signs, A answers "done". Whoever holds
-// both signatures records the trade and uploads it; the server settles it.
+// A's user confirms and A sends the canonical terms with its tag; B rebuilds
+// the terms from the offers it saw, checks they match and signs at once (B's
+// lock was its commitment), A answers "done". Whoever holds both signatures
+// records the trade and uploads it; the server settles it.
+//
+// The server never hears about a cancel: once A's tag is out, B can still
+// sign and settle. So the apps confirm the commitment (B's lock, A's sign)
+// and offer no cancel after it.
 //
 // Unicast frames can get lost, so while a trade is open each side repeats its
 // offer and lock every few seconds (receivers ignore revisions they have),
@@ -122,6 +127,7 @@ static void refresh_locks(void)
     trade_t *t = s_t;
     t->v.i_locked = !t->dirty && t->my_lock_mine == t->v.my_rev && t->my_lock_theirs == t->v.their_rev;
     t->v.they_locked = !t->dirty && t->their_lock_mine == t->v.their_rev && t->their_lock_theirs == t->v.my_rev;
+    t->v.can_sign = t->v.inviter && t->v.phase == TRADE_OPEN && t->v.i_locked && t->v.they_locked;
 }
 
 static void set_phase(trade_phase_t p)
@@ -132,9 +138,22 @@ static void set_phase(trade_phase_t p)
 
 static void cancelled(const char *fmt, const char *who)
 {
+    s_t->v.can_sign = false;
     snprintf(s_t->v.reason, sizeof(s_t->v.reason), fmt, who);
     set_phase(TRADE_CANCELLED);
     ESP_LOGI(TAG, "%s cancelled: %s", s_t->v.tid, s_t->v.reason);
+}
+
+static void record(const trade_t *t);
+
+// A's tag is out but B's signature never came. The server doesn't hear
+// cancels, so B may still sign and settle: record it as unconfirmed and keep
+// polling for the outcome.
+static void unconfirmed(const char *fmt)
+{
+    record(s_t);
+    s_t->v.unconfirmed = true;
+    cancelled(fmt, s_t->v.label);
 }
 
 static trade_t *start(const char *tid, const char *peer, const char *name, bool inviter)
@@ -150,6 +169,7 @@ static trade_t *start(const char *tid, const char *peer, const char *name, bool 
     game_peer_label(name, peer, t->v.label, sizeof(t->v.label));
     t->v.inviter = inviter;
     t->my_lock_mine = t->their_lock_mine = -1;
+    game_expect_trade(tid);
     return t;
 }
 
@@ -289,6 +309,13 @@ static void outcome(const char *body, bool toast)
     if (is_hex16(tid) && (!strcmp(status, "settled") || !strcmp(status, "rejected"))) {
         const char *reason = game_jstr(j, "reason");
         append_status(tid, status, reason);
+        if (s_t && !strcmp(s_t->v.tid, tid)) {
+            s_t->v.settled = status[0] == 's';
+            s_t->v.rejected = !s_t->v.settled;
+            if (!s_t->v.unconfirmed) {
+                strlcpy(s_t->v.reason, reason, sizeof(s_t->v.reason));   // keep why it was left open
+            }
+        }
         if (toast) {
             if (status[0] == 's') {
                 os_toast("Trade settled");
@@ -414,11 +441,11 @@ static bool sign(const char *role_id, char out[OS_MESH_TAG_LEN + 1])
     return ok;
 }
 
-// A: both locks hold -> terms.
-static void maybe_terms(void)
+// A: both locks hold and the user confirmed -> terms.
+void trade_sign(void)
 {
     trade_t *t = s_t;
-    if (!t->v.inviter || t->v.phase != TRADE_OPEN || !t->v.i_locked || !t->v.they_locked) {
+    if (!t || !t->v.can_sign) {
         return;
     }
     if (!build_terms(t, t->terms, sizeof(t->terms)) || !sign(game_badge_id(), t->tag_a)) {
@@ -427,6 +454,7 @@ static void maybe_terms(void)
         return;
     }
     set_phase(TRADE_SIGNING);
+    t->v.can_sign = false;
     t->last_sync = t->at;
     send_terms();
 }
@@ -469,8 +497,8 @@ static void on_offer(const cJSON *msg)
 {
     trade_t *t = s_t;
     int rev = game_jint(msg, "rev", -1);
-    if ((t->v.phase != TRADE_OPEN && t->v.phase != TRADE_SIGNING) || rev <= t->v.their_rev) {
-        return;
+    if (t->v.phase != TRADE_OPEN || rev <= t->v.their_rev) {
+        return;                         // after A's tag is out, the offers are fixed
     }
     trade_bundle_t *b = malloc(sizeof(*b));
     if (!b) {
@@ -479,9 +507,6 @@ static void on_offer(const cJSON *msg)
     if (bundle_parse(cJSON_GetObjectItemCaseSensitive(msg, "give"), b)) {
         t->v.theirs = *b;
         t->v.their_rev = rev;
-        if (t->v.phase == TRADE_SIGNING) {
-            set_phase(TRADE_OPEN);      // they changed their mind before signing
-        }
         refresh_locks();
     } else {
         ESP_LOGW(TAG, "bad offer from %s", t->v.peer);
@@ -578,14 +603,14 @@ void trade_on_mesh(const os_mesh_peer_t *from, cJSON *msg)
         t->their_lock_mine = game_jint(msg, "mine", -1);
         t->their_lock_theirs = game_jint(msg, "theirs", -1);
         refresh_locks();
-        maybe_terms();
     } else if (!strcmp(op, "terms")) {
         on_terms(msg);
     } else if (!strcmp(op, "sign")) {
         on_sign(msg);
     } else if (!strcmp(op, "cancel")) {
-        bool open = t->v.phase == TRADE_INVITING || t->v.phase == TRADE_OPEN || t->v.phase == TRADE_SIGNING;
-        if (open) {
+        if (t->v.phase == TRADE_SIGNING) {
+            unconfirmed("%s cancelled after you signed");
+        } else if (t->v.phase == TRADE_INVITING || t->v.phase == TRADE_OPEN) {
             cancelled("%s cancelled", t->v.label);
         }
     }
@@ -623,7 +648,7 @@ static void poll_step(int64_t now)
     }
     char path[48];
     snprintf(path, sizeof(path), "/api/device/trades/%s", s_poll_tids[--s_npoll]);
-    if (os_api_call("GET", path, NULL, 0, polled, NULL) == ESP_OK) {
+    if (os_api_call("GET", path, NULL, 0, polled, &s_poll_busy) == ESP_OK) {
         s_poll_busy = true;
     }
     if (!s_npoll) {
@@ -668,9 +693,10 @@ void trade_tick(int64_t now)
         os_mesh_peer_t p;
         if (!os_mesh_peer(t->v.peer, &p)) {
             if (t->v.phase == TRADE_SIGNING) {
-                record(t);              // A signed; if B did too, the trade still settles
+                unconfirmed("%s went out of range after you signed");
+            } else {
+                cancelled("%s is out of range", t->v.label);
             }
-            cancelled("%s is out of range", t->v.label);
             break;
         }
         if (t->dirty && now - t->last_offer > OFFER_DEBOUNCE) {
@@ -730,6 +756,23 @@ static const char *cant_trade(void)
     return NULL;
 }
 
+// A trade id is used once: an invite naming one we already signed is stale or forged.
+static bool tid_recorded(const char *tid)
+{
+    char path[96], want[32], line[256];
+    os_data_path(path, sizeof(path), TRADES_FILE);
+    snprintf(want, sizeof(want), "\"tid\":\"%s\"", tid);
+    FILE *f = os_data_ready() ? fopen(path, "r") : NULL;
+    bool found = false;
+    while (f && !found && fgets(line, sizeof(line), f)) {
+        found = strstr(line, want) != NULL;     // the tid leads each line
+    }
+    if (f) {
+        fclose(f);
+    }
+    return found;
+}
+
 bool trade_join(const char *tid, const char **why)
 {
     int i;
@@ -740,6 +783,10 @@ bool trade_join(const char *tid, const char **why)
         return false;
     }
     if ((*why = cant_trade())) {
+        return false;
+    }
+    if (tid_recorded(tid)) {
+        *why = "That trade already happened";
         return false;
     }
     os_mesh_peer_t p;
@@ -822,6 +869,7 @@ void trade_dismiss(void)
     }
     free(s_t);
     s_t = NULL;
+    game_expect_trade("");
 }
 
 void trade_cancel(void)
@@ -903,6 +951,17 @@ void trade_remove(bool page, int index)
     edited();
 }
 
+void trade_flush(void)
+{
+    trade_t *t = s_t;
+    if (editable() && t->dirty) {
+        t->dirty = false;
+        t->v.my_rev++;
+        refresh_locks();
+        send_offer();
+    }
+}
+
 void trade_lock(bool on)
 {
     trade_t *t = s_t;
@@ -913,17 +972,11 @@ void trade_lock(bool on)
         edited();                       // unlocking = a new revision of the same offer
         return;
     }
-    if (t->dirty) {
-        // The peer must see this revision before the lock that names it.
-        t->dirty = false;
-        t->v.my_rev++;
-        send_offer();
-    }
+    trade_flush();                      // the peer must see this revision before the lock that names it
     t->my_lock_mine = t->v.my_rev;
     t->my_lock_theirs = t->v.their_rev;
     refresh_locks();
     send_lock();
-    maybe_terms();
 }
 
 // ---------------------------------------------------------------------------
@@ -986,7 +1039,7 @@ int trade_records_load(trade_rec_t **out, int max)
 }
 
 // ---------------------------------------------------------------------------
-// Console: trade [status|invite <id>|join|lamps <n>|item <id>|page <id>|lock|unlock|cancel|dismiss].
+// Console: trade [status|invite <id>|join|lamps <n>|item <id>|page <id>|lock|unlock|sign|cancel|dismiss].
 // Runs on the OS task like everything else here.
 
 static void cmd_status(void)
@@ -1038,10 +1091,12 @@ static void cmd_run(void *arg)
         trade_set_lamps(atoi(val));
     } else if (!strcmp(op, "lock") || !strcmp(op, "unlock")) {
         trade_lock(op[0] == 'l');
+    } else if (!strcmp(op, "sign")) {
+        trade_sign();
     } else if ((!strcmp(op, "page") || !strcmp(op, "item")) && val) {
         trade_add(op[0] == 'p', val, val, &why);
     } else {
-        why = "usage: trade [status|invite <id>|join|lamps <n>|item <id>|page <id>|lock|unlock|cancel|dismiss]";
+        why = "usage: trade [status|invite <id>|join|lamps <n>|item <id>|page <id>|lock|unlock|sign|cancel|dismiss]";
     }
     if (why) {
         printf("trade: %s\n", why);
@@ -1064,6 +1119,6 @@ static int cmd_trade(int argc, char **argv)
 void trade_init(void)
 {
     s_poll_at = 15000;                  // first check shortly after boot
-    os_cmd_register("trade", "trade [status|invite <id>|join|lamps <n>|item <id>|page <id>|lock|unlock|cancel|dismiss]",
+    os_cmd_register("trade", "trade [status|invite <id>|join|lamps <n>|item <id>|page <id>|lock|unlock|sign|cancel|dismiss]",
                     cmd_trade);
 }

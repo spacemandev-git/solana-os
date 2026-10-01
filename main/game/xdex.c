@@ -28,6 +28,7 @@ static const char *TAG = "xdex";
 #define OK_TRIES        3
 #define RAM_CARDS       8           // without a microSD card
 #define RESULT_SHOW_MS  8000
+#define FINISH_MS       12000       // accepted, waiting for "fin" (OK_TRIES x RESEND_MS)
 
 static xdex_req_t s_pending[XDEX_PENDING_MAX];
 static int s_npending;
@@ -352,7 +353,17 @@ static void on_req(const os_mesh_peer_t *from, const cJSON *msg)
     }
     if (i < 0) {
         if (s_npending == XDEX_PENDING_MAX) {
-            drop_pending(XDEX_PENDING_MAX - 1);     // the oldest
+            // Make room by dropping the oldest request nobody answered yet; an
+            // accepted swap is never pushed out (a flood of fake requests
+            // could otherwise wedge it).
+            int old = -1;
+            for (int k = s_npending - 1; k >= 0 && old < 0; k--) {
+                old = s_pending[k].accepted ? -1 : k;
+            }
+            if (old < 0) {
+                return;
+            }
+            drop_pending(old);
         }
         memmove(&s_pending[1], &s_pending[0], s_npending * sizeof(xdex_req_t));
         s_npending++;
@@ -496,6 +507,9 @@ void xdex_tick(int64_t now)
                 drop_pending(i);
             }
         }
+    }
+    if (s_last.phase == XDEX_FINISHING && now - s_last.at > FINISH_MS + RESEND_MS) {
+        set_phase(XDEX_FAILED, NULL, NULL);     // whatever became of the request
     }
     if (s_last.phase == XDEX_ASKING) {
         if (now - s_last.at > XDEX_REQ_TTL_MS) {

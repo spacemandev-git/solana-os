@@ -17,7 +17,6 @@
 #include "core/os_api.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
-#include "core/os_wifi.h"
 #include "core/ui.h"
 #include "game/game.h"
 
@@ -31,30 +30,16 @@
 #define REVEAL_MAX  10
 #define BODY_MAX    1600
 #define SCROLL_STEP 40
-#define BUY_ARM_MS  3000
 
 enum { TAB_COLLECTION, TAB_PACKS, TAB_SHOP, TAB_COUNT };
 static const char *const tab_names[TAB_COUNT] = {"Collection", "Packs", "Shop"};
 typedef enum { V_TABS, V_PAGES, V_READ, V_REVEAL, V_WELCOME } view_t;
 
-// docs/HHGTS.md "One look": category and rarity colours.
-static const struct {
-    const char *id, *name;
-    uint32_t col;
-} cats[] = {
-    {"events", "Events", COL_CAT_EVENTS},          {"culture", "Culture", COL_CAT_CULTURE},
-    {"tech", "Tech docs", COL_CAT_TECH},           {"releases", "Releases", COL_CAT_RELEASES},
-    {"ecosystem", "Ecosystem", COL_CAT_ECOSYSTEM}, {"history", "History", COL_CAT_HISTORY},
-    {"people", "People", COL_CAT_PEOPLE},          {"lore", "Lore", COL_CAT_LORE},
-};
+// Category ids in the Guide's order and the rarities (server/API.md); names
+// and colours come from ui_cat_name(), ui_cat_color() and ui_rarity_color().
+static const char *const cats[] = {"events", "culture", "tech", "releases", "ecosystem", "history", "people", "lore"};
 #define CAT_COUNT   ((int)(sizeof(cats) / sizeof(cats[0])))
-
-static const struct {
-    const char *id;
-    uint32_t col;
-} rarities[] = {
-    {"common", COL_RARITY_COMMON}, {"rare", COL_RARITY_RARE}, {"epic", COL_RARITY_EPIC}, {"legendary", COL_RARITY_LEGEND},
-};
+static const char *const rarities[] = {"common", "rare", "epic", "legendary"};
 enum { R_COMMON, R_RARE, R_EPIC, R_LEGENDARY };
 
 typedef struct {
@@ -81,19 +66,20 @@ typedef struct {
 typedef struct {
     char sku[24];
     char name[33];
-    char desc[57];
+    char desc[96];
     int price;
     bool available;
 } item_t;
 
 typedef struct {
-    lv_obj_t *root, *home, *tabs, *head, *hint, *view;
+    lv_obj_t *root, *home, *tabs, *head, *hint, *view, *offline;
     ui_list_t *list;
     int tab, tick;
     view_t mode;
     bool touched;               // the user moved: don't jump to Packs any more
     bool welcomed;              // the welcome showed this time
     bool was_online;
+    bool failed;                // the last server request failed
     // Collection
     struct { int owned, total; } catn[CAT_COUNT];
     int owned, total;
@@ -120,8 +106,8 @@ typedef struct {
     item_t items[SHOP_MAX];
     int nitems;
     int64_t shop_at;
-    int64_t buy_armed;
-    int buy_sel;
+    char buy_sku[24], buy_name[33];  // what the confirm showed
+    int buy_price;
 } guide_ui_t;
 
 static guide_ui_t *s;
@@ -134,7 +120,7 @@ static void welcome_open(void);
 static int cat_index(const char *id)
 {
     for (int i = 0; i < CAT_COUNT; i++) {
-        if (!strcmp(cats[i].id, id)) {
+        if (!strcmp(cats[i], id)) {
             return i;
         }
     }
@@ -144,7 +130,7 @@ static int cat_index(const char *id)
 static int rarity_index(const char *id)
 {
     for (int i = 0; i < 4; i++) {
-        if (!strcmp(rarities[i].id, id)) {
+        if (!strcmp(rarities[i], id)) {
             return i;
         }
     }
@@ -164,51 +150,26 @@ static void page_from_json(page_t *p, const cJSON *j)
 }
 
 // Header line: what the tab shows and how fresh it is.
-static void head_set(const char *left, int64_t at, bool cached)
+static void head_set(const char *left, int64_t at)
 {
     char synced[32] = "";
-    if (cached && !os_api_online()) {
+    if (!os_api_online()) {
         game_synced(at, synced, sizeof(synced));
     }
     lv_label_set_text_fmt(s->head, "%s%s%s", left, synced[0] ? "  " LV_SYMBOL_BULLET "  " : "", synced);
 }
 
-// No data and no Wi-Fi: say so, and SELECT turns Wi-Fi on.
-static const char *offline_text(void)
+static const char *loading_text(void)
 {
-    static char text[80];
-    char ssid[33];
-    if (os_wifi_saved_ssid(ssid, sizeof(ssid))) {
-        snprintf(text, sizeof(text), "Wi-Fi is off. SELECT to connect to %s", ssid);
-    } else {
-        strlcpy(text, "Wi-Fi is off. Join a network in the Wi-Fi app", sizeof(text));
-    }
-    return text;
+    return s->failed ? "Couldn't reach the server. Try again later" : "Loading...";
 }
 
-static bool wifi_on(void)
+// The shared offline panel covers the list when there's nothing saved to
+// show, and always while the badge has no owner.
+static void offline_show(bool no_data)
 {
-    char ssid[33];
-    if (os_api_online() || os_wifi_state() == OS_WIFI_CONNECTING) {
-        return false;
-    }
-    if (os_wifi_saved_ssid(ssid, sizeof(ssid))) {
-        os_wifi_set_enabled(true);
-        os_toast("Connecting to %s...", ssid);
-    } else {
-        os_launch_id("wifi");
-    }
-    return true;
-}
-
-static bool not_linked(void)
-{
-    if (game_claimed()) {
-        return false;
-    }
-    ui_list_set_empty(s->list, "Not linked yet: claim this badge first");
-    ui_list_set_count(s->list, 0);
-    return true;
+    ui_net_t st = ui_offline_update(s->offline);
+    lv_obj_set_hidden(s->offline, st == UI_NET_OK || (!no_data && st != UI_NET_NOT_LINKED));
 }
 
 // ---------------------------------------------------------------------------
@@ -238,16 +199,15 @@ static void collection_render(void)
     } else {
         left[0] = 0;
     }
-    head_set(left, s->guide_at, true);
-    if (not_linked()) {
-        return;
-    }
-    ui_list_set_empty(s->list, s->total ? "Nothing here yet" : os_api_online() ? "Loading..." : offline_text());
+    head_set(left, s->guide_at);
+    offline_show(!s->total);
+    ui_list_set_empty(s->list, loading_text());
     ui_list_set_count(s->list, s->total ? CAT_COUNT : 0);
 }
 
 static void got_guide(int status, const char *body, void *ctx)
 {
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         guide_apply(j);
@@ -289,11 +249,12 @@ static void pages_render(void)
         return;
     }
     char left[48];
-    snprintf(left, sizeof(left), "%s  " LV_SYMBOL_BULLET "  %d of %d", cats[s->cat].name, s->catn[s->cat].owned,
+    snprintf(left, sizeof(left), "%s  " LV_SYMBOL_BULLET "  %d of %d", ui_cat_name(cats[s->cat]), s->catn[s->cat].owned,
              s->catn[s->cat].total);
-    head_set(left, s->pages_at, true);
-    lv_obj_set_style_text_color(s->head, ui_col(cats[s->cat].col), 0);
-    ui_list_set_empty(s->list, s->loading ? "Loading..." : os_api_online() ? "Nothing here yet" : offline_text());
+    head_set(left, s->pages_at);
+    lv_obj_set_style_text_color(s->head, ui_col(ui_cat_color(cats[s->cat])), 0);
+    offline_show(!s->npages);
+    ui_list_set_empty(s->list, s->loading || (s->failed && !s->npages) ? loading_text() : "Nothing here yet");
     ui_list_set_count(s->list, s->npages);
 }
 
@@ -301,12 +262,13 @@ static void got_pages(int status, const char *body, void *ctx)
 {
     bool first = !s->cursor[0];
     s->loading = false;
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         if (first) {
             s->npages = 0;
             char name[32];
-            snprintf(name, sizeof(name), "guide-%s", cats[s->cat].id);
+            snprintf(name, sizeof(name), "guide-%s", cats[s->cat]);
             game_cache_put(name, body);
             s->pages_at = os_cloud_time_ms();
         }
@@ -320,9 +282,9 @@ static void got_pages(int status, const char *body, void *ctx)
 static void pages_more(void)
 {
     char path[112];
-    snprintf(path, sizeof(path), "/api/device/guide/pages?category=%s%s%s", cats[s->cat].id,
+    snprintf(path, sizeof(path), "/api/device/guide/pages?category=%s%s%s", cats[s->cat],
              s->cursor[0] ? "&cursor=" : "", s->cursor);
-    if (os_api_call("GET", path, NULL, 0, got_pages, s->pages) == ESP_OK) {
+    if (os_api_call("GET", path, NULL, 0, got_pages, s->cursor) == ESP_OK) {
         s->loading = true;
     }
 }
@@ -333,17 +295,16 @@ static void pages_open(int cat)
         os_toast("Out of memory");
         return;
     }
+    ui_list_set_count(s->list, 0);      // the rows are categories until the pages render
     s->mode = V_PAGES;
     s->cat = cat;
     s->npages = 0;
     s->cursor[0] = 0;
-    lv_obj_set_hidden(s->tabs, true);
     char name[32];
-    snprintf(name, sizeof(name), "guide-%s", cats[cat].id);
+    snprintf(name, sizeof(name), "guide-%s", cats[cat]);
     cJSON *j = game_cache_get(name, &s->pages_at);
     pages_add(cJSON_GetObjectItemCaseSensitive(j, "items"));
     cJSON_Delete(j);
-    ui_list_select(s->list, 0);
     if (os_api_online()) {
         pages_more();
     }
@@ -354,9 +315,8 @@ static void pages_open(int cat)
 static void pages_close(void)
 {
     s->mode = V_TABS;
-    os_api_cancel(s->pages);            // a page load in flight
+    os_api_cancel(s->cursor);           // a page load in flight (ctx: a field of s, never NULL)
     s->loading = false;
-    lv_obj_set_hidden(s->tabs, false);
     lv_obj_set_style_text_color(s->head, ui_col(COL_DIM), 0);
     show_tab(TAB_COLLECTION);
     ui_list_select(s->list, s->cat);
@@ -372,7 +332,7 @@ static void rarity_edge(lv_obj_t *parent, int h, int rarity)
     lv_obj_remove_style_all(e);
     lv_obj_set_size(e, 3, h);
     lv_obj_set_style_bg_opa(e, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(e, ui_col(rarities[rarity].col), 0);
+    lv_obj_set_style_bg_color(e, ui_col(ui_rarity_color(rarities[rarity])), 0);
     if (rarity == R_LEGENDARY) {
         lv_obj_set_style_bg_color(e, ui_col(COL_PURPLE), 0);
         lv_obj_set_style_bg_grad_color(e, lv_color_hex(COL_GREEN), 0);
@@ -414,10 +374,10 @@ static void card_head(lv_obj_t *col, const page_t *p, int width)
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(row, 8, 0);
-    chip(row, cats[p->cat].name, cats[p->cat].col);
-    lv_obj_t *r = ui_label(row, &sol_mono_12, rarities[p->rarity].col, rarities[p->rarity].id);
+    chip(row, ui_cat_name(cats[p->cat]), ui_cat_color(cats[p->cat]));
+    lv_obj_t *r = ui_label(row, &sol_mono_12, ui_rarity_color(rarities[p->rarity]), rarities[p->rarity]);
     if (p->count > 1) {
-        lv_label_set_text_fmt(r, "%s  x%d", rarities[p->rarity].id, p->count);
+        lv_label_set_text_fmt(r, "%s  x%d", rarities[p->rarity], p->count);
     }
 }
 
@@ -563,16 +523,15 @@ static void packs_render(void)
     }
     char left[32];
     snprintf(left, sizeof(left), "%d unopened", s->npacks);
-    head_set(left, s->packs_at, true);
-    if (not_linked()) {
-        return;
-    }
-    ui_list_set_empty(s->list, s->packs_at || os_api_online() ? "No packs. Get one in the Shop." : offline_text());
+    head_set(left, s->packs_at);
+    offline_show(!s->packs_at);
+    ui_list_set_empty(s->list, s->packs_at ? "No packs. Get one in the Shop." : loading_text());
     ui_list_set_count(s->list, s->npacks);
 }
 
 static void got_packs(int status, const char *body, void *ctx)
 {
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         packs_apply(j);
@@ -607,7 +566,7 @@ static void reveal_show(void)
     lv_obj_t *v = view_open();
     lv_obj_t *card = ui_panel(v, 14, 6, OS_ROOT_W - 28, VIEW_H - 30);
     lv_obj_set_style_pad_all(card, 0, 0);
-    lv_obj_set_style_border_color(card, ui_col(rarities[p->rarity].col), 0);
+    lv_obj_set_style_border_color(card, ui_col(ui_rarity_color(rarities[p->rarity])), 0);
     rarity_edge(card, VIEW_H - 32, p->rarity);
     lv_obj_t *col = column(card, OS_ROOT_W - 50, VIEW_H - 40);
     lv_obj_set_pos(col, 14, 8);
@@ -626,7 +585,7 @@ static void reveal_show(void)
     if (p->rarity == R_LEGENDARY) {
         game_led_sweep();
     } else {
-        game_led_flash(rarities[p->rarity].col);
+        game_led_flash(ui_rarity_color(rarities[p->rarity]));
     }
     set_hint();
 }
@@ -663,7 +622,7 @@ static void got_open(int status, const char *body, void *ctx)
     os_data_remove("cache/guide.json");
     for (int i = 0; i < CAT_COUNT; i++) {
         char rel[40];
-        snprintf(rel, sizeof(rel), "cache/guide-%s.json", cats[i].id);
+        snprintf(rel, sizeof(rel), "cache/guide-%s.json", cats[i]);
         os_data_remove(rel);
     }
     s->mode = V_REVEAL;
@@ -677,9 +636,7 @@ static void pack_open(int i)
         return;
     }
     if (!os_api_online()) {
-        if (!wifi_on()) {
-            os_toast("Packs open online");
-        }
+        os_toast("Turn on Wi-Fi to open packs");
         return;
     }
     char path[80];
@@ -732,23 +689,21 @@ static void shop_render(void)
         return;
     }
     os_cloud_info_t *in = malloc(sizeof(*in));
-    char left[48] = "", amt[16];
+    char left[48] = "", amt[24];
     if (in) {
         os_cloud_get_info(in);
-        game_fmt_lamps(amt, sizeof(amt), in->lamps);
-        snprintf(left, sizeof(left), "You have %s !LAMPs", amt);
+        snprintf(left, sizeof(left), "You have %s", ui_fmt_lamps(amt, sizeof(amt), in->lamps));
         free(in);
     }
-    head_set(left, s->shop_at, true);
-    if (not_linked()) {
-        return;
-    }
-    ui_list_set_empty(s->list, s->shop_at || os_api_online() ? "The shop is empty" : offline_text());
+    head_set(left, s->shop_at);
+    offline_show(!s->shop_at);
+    ui_list_set_empty(s->list, s->shop_at ? "The shop is empty" : loading_text());
     ui_list_set_count(s->list, s->nitems);
 }
 
 static void got_shop(int status, const char *body, void *ctx)
 {
+    s->failed = status != 200;
     if (status == 200) {
         cJSON *j = cJSON_Parse(body);
         shop_apply(j);
@@ -771,6 +726,8 @@ static void shop_load(void)
     }
 }
 
+static void ask_buy(const char *question);
+
 static void got_buy(int status, const char *body, void *ctx)
 {
     cJSON *j = cJSON_Parse(body);
@@ -789,6 +746,11 @@ static void got_buy(int status, const char *body, void *ctx)
         }
         game_led_flash(COL_LAMPS);
         packs_load();
+    } else if (status == 409 && game_jint(j, "price", -1) >= 0) {
+        // The price changed since the list was fetched: show the new one and ask again.
+        s->buy_price = game_jint(j, "price", 0);
+        shop_load();
+        ask_buy("The price changed.");
     } else if (status == 402) {
         os_toast("Not enough !LAMPs");
     } else {
@@ -797,6 +759,29 @@ static void got_buy(int status, const char *body, void *ctx)
     }
     cJSON_Delete(j);
     shop_render();
+}
+
+// The buy carries the price the confirm showed (server/API.md), so a change
+// in between can't spend more than the user agreed to.
+static void buy_confirmed(bool yes, void *ctx)
+{
+    if (!yes || !s) {
+        return;
+    }
+    char body[96];
+    snprintf(body, sizeof(body), "{\"sku\":\"%s\",\"price\":%d}", s->buy_sku, s->buy_price);
+    if (os_api_call("POST", "/api/device/shop/buy", body, 0, got_buy, s) == ESP_OK) {
+        os_toast("Buying %s...", s->buy_name);
+    }
+}
+
+// Spending: the OS asks, not the app.
+static void ask_buy(const char *lead)
+{
+    char q[128], amt[24];
+    snprintf(q, sizeof(q), "%s%sBuy %s for %s?", lead, lead[0] ? " " : "", s->buy_name,
+             ui_fmt_lamps(amt, sizeof(amt), s->buy_price));
+    os_confirm(q, buy_confirmed, NULL);
 }
 
 static void shop_select(int i)
@@ -810,27 +795,13 @@ static void shop_select(int i)
         return;
     }
     if (!os_api_online()) {
-        if (!wifi_on()) {
-            os_toast("The shop needs Wi-Fi");
-        }
+        os_toast("Turn on Wi-Fi to buy");
         return;
     }
-    // Spending: SELECT twice.
-    int64_t now = game_now_ms();
-    if (!s->buy_armed || s->buy_sel != i || now - s->buy_armed > BUY_ARM_MS) {
-        char amt[16];
-        game_fmt_lamps(amt, sizeof(amt), it->price);
-        s->buy_armed = now;
-        s->buy_sel = i;
-        os_toast("SELECT again to buy %s for %s !LAMPs", it->name, amt);
-        return;
-    }
-    s->buy_armed = 0;
-    char body[64];
-    snprintf(body, sizeof(body), "{\"sku\":\"%s\"}", it->sku);
-    if (os_api_call("POST", "/api/device/shop/buy", body, 0, got_buy, s) == ESP_OK) {
-        os_toast("Buying %s...", it->name);
-    }
+    strlcpy(s->buy_sku, it->sku, sizeof(s->buy_sku));
+    strlcpy(s->buy_name, it->name, sizeof(s->buy_name));
+    s->buy_price = it->price;
+    ask_buy("");
 }
 
 // ---------------------------------------------------------------------------
@@ -848,18 +819,18 @@ static void row(int i, ui_row_t *r, void *ctx)
         }
         lv_snprintf(r->title, sizeof(r->title), "#%03d  %s", p->number, p->title);
         if (p->count > 1) {
-            snprintf(r->sub, sizeof(r->sub), "%s  " LV_SYMBOL_BULLET "  %d copies", cats[p->cat].name, p->count);
+            snprintf(r->sub, sizeof(r->sub), "%s  " LV_SYMBOL_BULLET "  %d copies", ui_cat_name(cats[p->cat]), p->count);
         } else {
-            strlcpy(r->sub, cats[p->cat].name, sizeof(r->sub));
+            strlcpy(r->sub, ui_cat_name(cats[p->cat]), sizeof(r->sub));
         }
-        strlcpy(r->right, rarities[p->rarity].id, sizeof(r->right));
-        r->right_color = rarities[p->rarity].col;
+        strlcpy(r->right, rarities[p->rarity], sizeof(r->right));
+        r->right_color = ui_rarity_color(rarities[p->rarity]);
         return;
     }
     switch (s->tab) {
     case TAB_COLLECTION:
-        strlcpy(r->title, cats[i].name, sizeof(r->title));
-        r->title_color = cats[i].col;
+        strlcpy(r->title, ui_cat_name(cats[i]), sizeof(r->title));
+        r->title_color = ui_cat_color(cats[i]);
         if (s->catn[i].owned) {
             snprintf(r->sub, sizeof(r->sub), "%d of %d pages", s->catn[i].owned, s->catn[i].total);
         } else {
@@ -880,12 +851,10 @@ static void row(int i, ui_row_t *r, void *ctx)
     }
     case TAB_SHOP: {
         const item_t *it = &s->items[i];
-        char amt[16];
         strlcpy(r->title, it->name, sizeof(r->title));
         strlcpy(r->sub, it->desc, sizeof(r->sub));
         if (it->available) {
-            game_fmt_lamps(amt, sizeof(amt), it->price);
-            lv_snprintf(r->right, sizeof(r->right), "%s !LAMPs", amt);
+            ui_fmt_lamps(r->right, sizeof(r->right), it->price);
             r->right_color = COL_LAMPS;
         } else {
             strlcpy(r->right, "sold out", sizeof(r->right));
@@ -935,7 +904,7 @@ static void show_tab(int tab)
 {
     s->tab = tab;
     ui_tabs_select(s->tabs, tab);
-    ui_list_select(s->list, 0);
+    ui_list_set_count(s->list, 0);      // the rows belong to the other tab until it renders
     tab_render();
 }
 
@@ -997,6 +966,7 @@ static void enter(lv_obj_t *root)
     lv_obj_set_width(s->head, OS_ROOT_W - 16);
     lv_label_set_long_mode(s->head, LV_LABEL_LONG_MODE_DOTS);
     s->list = ui_list_create(s->home, LIST_Y, LIST_H, row, NULL);
+    s->offline = ui_offline_create(s->home, LIST_Y, LIST_H, true);
     s->hint = ui_hint(root, "");
 
     s->was_online = os_api_online();
@@ -1015,7 +985,7 @@ static void leave(void)
         return;
     }
     os_api_cancel(s);
-    os_api_cancel(s->pages);
+    os_api_cancel(s->cursor);
     os_api_cancel(s->reading);
     free(s->pages);
     free(s->cards);
@@ -1025,7 +995,7 @@ static void leave(void)
 
 static bool tabs_key(os_key_t k, bool repeat)
 {
-    if (ui_list_key(s->list, k, repeat)) {
+    if (ui_offline_key(s->offline, k) || ui_list_key(s->list, k, repeat)) {
         return true;
     }
     int sel = ui_list_selected(s->list);
@@ -1035,15 +1005,10 @@ static bool tabs_key(os_key_t k, bool repeat)
         show_tab((s->tab + (k == OS_KEY_RIGHT ? 1 : TAB_COUNT - 1)) % TAB_COUNT);
         return true;
     case OS_KEY_SELECT:
-        if (repeat) {
+        if (repeat || sel < 0) {
             return true;
         }
-        if (sel < 0 && !game_claimed()) {
-            return true;
-        }
-        if (sel < 0) {
-            wifi_on();
-        } else if (s->tab == TAB_COLLECTION) {
+        if (s->tab == TAB_COLLECTION) {
             pages_open(sel);
         } else if (s->tab == TAB_PACKS) {
             pack_open(sel);
@@ -1066,6 +1031,9 @@ static bool on_key(os_key_t k, bool repeat)
     case V_TABS:
         return tabs_key(k, repeat);
     case V_PAGES:
+        if (ui_offline_key(s->offline, k)) {
+            return true;
+        }
         if (ui_list_key(s->list, k, repeat)) {
             if (s->cursor[0] && !s->loading && os_api_online() && ui_list_selected(s->list) >= s->npages - 3) {
                 pages_more();
@@ -1080,8 +1048,6 @@ static bool on_key(os_key_t k, bool repeat)
                 reader_open(&s->pages[sel]);
             } else if (sel >= 0) {
                 os_toast("Not collected yet. Open packs to find it");
-            } else {
-                wifi_on();
             }
         }
         return true;
@@ -1109,16 +1075,27 @@ static void on_tick(void)
     if (!s) {
         return;
     }
-    // Wi-Fi came on: fetch everything again. Otherwise keep "synced" fresh.
-    if (++s->tick % 20 == 0 && s->mode == V_TABS) {
-        bool online = os_api_online();
-        if (online && !s->was_online) {
+    // Every 2 s: refetch when Wi-Fi came on, keep "synced" and the offline
+    // panel current.
+    if (++s->tick % 20) {
+        return;
+    }
+    bool online = os_api_online();
+    bool came_online = online && !s->was_online;
+    s->was_online = online;
+    if (s->mode == V_TABS) {
+        if (came_online) {
             collection_load();
             packs_load();
             shop_load();
         }
-        s->was_online = online;
         tab_render();
+    } else if (s->mode == V_PAGES) {
+        if (came_online && !s->loading) {
+            s->cursor[0] = 0;
+            pages_more();
+        }
+        pages_render();
     }
 }
 

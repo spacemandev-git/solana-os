@@ -62,6 +62,7 @@ const quest_download_t *quests_download(void);
 void quests_log_refresh(void);
 bool quests_log_busy(void);
 int quests_log(const quest_entry_t **out);
-int64_t quests_log_at(void);                // unix ms of the data shown, 0 = unknown
+bool quests_log_saved(void);                 // showing the cached copy, not a fresh answer
+int64_t quests_log_at(void);                // unix ms the shown data was fetched, 0 = unknown
 const char *quests_log_error(void);         // "" when fine
 void quests_log_free(void);                 // the app is closing

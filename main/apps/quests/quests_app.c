@@ -71,11 +71,15 @@ static void row(int i, ui_row_t *r, void *ctx)
     strlcpy(r->title, e->title, sizeof(r->title));
     r->title_color = status_color(e->status);
     if (!strcmp(e->status, "active") && e->step[0]) {
-        lv_snprintf(r->sub, sizeof(r->sub), "%s%s%s", e->step, e->at[0] ? "  @ " : "", e->at);
+        lv_snprintf(r->sub, sizeof(r->sub), "%s%s%s", e->step, e->at[0] ? " @ " : "", e->at);
     } else if (!strcmp(e->status, "locked")) {
         strlcpy(r->sub, "Finish other quests first", sizeof(r->sub));
+    } else if (!strcmp(e->status, "completed")) {
+        strlcpy(r->sub, "Done", sizeof(r->sub));
+    } else if (e->at[0]) {
+        lv_snprintf(r->sub, sizeof(r->sub), "Talk to %s to start", e->at);
     } else {
-        strlcpy(r->sub, !strcmp(e->status, "completed") ? "Done" : "Talk to its character to start", sizeof(r->sub));
+        strlcpy(r->sub, "Talk to its character to start", sizeof(r->sub));
     }
     strlcpy(r->right, e->status, sizeof(r->right));
     r->right_color = status_color(e->status);
@@ -113,7 +117,7 @@ static void log_render(void)
         strlcpy(foot, "Checking...", sizeof(foot));
     } else if (err[0]) {
         strlcpy(foot, err, sizeof(foot));
-    } else if (n && !os_api_online()) {
+    } else if (n && quests_log_saved()) {
         game_synced(quests_log_at(), foot, sizeof(foot));
     }
     lv_label_set_text(s->foot, foot);
@@ -141,7 +145,7 @@ static void show_tab(int tab)
 {
     s->tab = tab;
     ui_tabs_select(s->tabs, tab);
-    ui_list_select(s->list, 0);
+    ui_list_set_count(s->list, 0);      // the rows belong to the other tab until it reloads
     lv_obj_set_hidden(s->foot, tab != TAB_LOG);
     if (tab == TAB_NEARBY) {
         ui_list_set_empty(s->list, "No beacons nearby. Characters wait at beacons around the venue.");

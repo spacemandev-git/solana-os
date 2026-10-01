@@ -12,6 +12,8 @@
 #include "core/os.h"
 #include "core/os_api.h"
 #include "core/os_cloud.h"
+#include "core/os_data.h"
+#include "core/os_wifi.h"
 #include "core/ui.h"
 #include "game/trade.h"
 
@@ -28,6 +30,8 @@
 #define LAMPS_STEP      5
 #define CANCEL_ARM_MS   3000
 #define GOODS_PAGES     6           // server pages followed per list
+#define GOODS_FRESH_MS  (10 * 60000)
+#define GOODS_WAIT_MS   20000       // longest the radio waits for the goods to load
 
 enum { TAB_NEARBY, TAB_TRADES };
 static const char *const tab_names[] = {"Nearby", "Trades"};
@@ -60,6 +64,8 @@ typedef struct {
     ui_list_t *mine;
     char sig[96];                   // what the trade screen shows, to redraw on change
     int64_t cancel_armed;
+    int ask_mine, ask_theirs;       // revisions shown when the lock / sign confirm opened
+    bool sign_asked;                // the sign confirm opened for this pair of locks
     // Picker
     lv_obj_t *picker;
     ui_list_t *goods_list;
@@ -69,7 +75,10 @@ typedef struct {
     int goods_pages;
     char goods_cursor[48];
     bool goods_items_done;
+    bool dir_started;               // cache/pagedir.txt rewritten this load
     int64_t goods_at;
+    bool acquired;                  // holding the mesh radio
+    int64_t opened;
 } trade_ui_t;
 
 static trade_ui_t *s;
@@ -110,9 +119,9 @@ static void home_row(int i, ui_row_t *r, void *ctx)
         if (t->status == TRADE_REC_REJECTED && t->reason[0]) {
             snprintf(r->sub, sizeof(r->sub), "%s", t->reason);
         } else if (t->status == TRADE_REC_UNCONFIRMED) {
-            snprintf(r->sub, sizeof(r->sub), "Waiting for %s's badge to sync", t->label);
+            lv_snprintf(r->sub, sizeof(r->sub), "Waiting for %s's badge to sync", t->label);
         } else {
-            lv_snprintf(r->sub, sizeof(r->sub), "Gave %s  " LV_SYMBOL_BULLET "  got %s", t->gave, t->got);
+            lv_snprintf(r->sub, sizeof(r->sub), "Gave %s, got %s", t->gave, t->got);
         }
         strlcpy(r->right, status_word(t->status, &r->right_color), sizeof(r->right));
         return;
@@ -166,13 +175,15 @@ static void show_tab(int tab)
 {
     s->tab = tab;
     ui_tabs_select(s->tabs, tab);
-    ui_list_select(s->list, 0);
+    ui_list_set_count(s->list, 0);      // the rows belong to the other tab until it reloads
     if (tab == TAB_NEARBY) {
-        ui_list_set_empty(s->list, game_claimed() ? "No badges nearby yet. Badges show up here when they're in range."
-                                                  : "Not linked yet: claim this badge first");
+        ui_list_set_empty(s->list, !game_claimed() ? "Not linked yet: claim this badge first"
+                                   : !s->acquired ? "Loading your items and pages, then looking for badges..."
+                                                  : "No badges nearby yet. Badges show up here when they're in range.");
         nearby_refresh();
     } else {
-        ui_list_set_empty(s->list, "Nothing here yet. Trades you sign show up here.");
+        ui_list_set_empty(s->list, os_data_ready() ? "Nothing here yet. Trades you sign show up here."
+                                                   : "No microSD card: trades still upload, but aren't kept here.");
         trade_poll_now();
         trades_refresh();
     }
@@ -270,6 +281,75 @@ static void goods_show(void)
     ui_list_set_count(s->goods_list, s->ngoods);
 }
 
+// Page directory, "id|number|title" per line in cache/pagedir.txt, written
+// from the full page list the goods loader reads (title "" where the device
+// API hides it: pages you don't own). Only ids are signed in a trade, so a
+// peer's page is shown by this list, not by the title it sends.
+#define PAGEDIR "cache/pagedir.txt"
+
+static void pagedir_add(const cJSON *items)
+{
+    char *buf = malloc(2048);
+    size_t len = 0;
+    const cJSON *e;
+    cJSON_ArrayForEach(e, items) {
+        if (buf && len < 2048) {
+            len += snprintf(buf + len, 2048 - len, "%s%s|%d|%s", len ? "\n" : "", game_jstr(e, "id"),
+                            game_jint(e, "number", 0), game_jint(e, "count", 0) ? game_jstr(e, "title") : "");
+        }
+    }
+    if (buf && len && len < 2048) {
+        if (s->dir_started) {
+            os_data_append(PAGEDIR, buf);
+        } else {
+            buf[len++] = '\n';
+            os_data_write(PAGEDIR, buf, len);
+            s->dir_started = true;
+        }
+    }
+    free(buf);
+}
+
+static bool pagedir_find(const char *id, int *number, char *title, size_t n)
+{
+    char path[96], line[128];
+    os_data_path(path, sizeof(path), PAGEDIR);
+    FILE *f = os_data_ready() ? fopen(path, "r") : NULL;
+    size_t idlen = strlen(id);
+    bool found = false;
+    while (f && !found && fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, id, idlen) && line[idlen] == '|') {
+            char *num = line + idlen + 1, *t = strchr(num, '|');
+            found = t != NULL;
+            if (found) {
+                *number = atoi(num);
+                t[strcspn(t, "\r\n")] = 0;
+                game_ascii(title, n, t + 1);
+            }
+        }
+    }
+    if (f) {
+        fclose(f);
+    }
+    return found;
+}
+
+// The other side's things as we can vouch for them.
+static void their_label(bool page, const trade_thing_t *th, char *out, size_t n)
+{
+    int number;
+    char title[TRADE_NAME_LEN + 1];
+    if (page && pagedir_find(th->id, &number, title, sizeof(title))) {
+        if (title[0]) {
+            lv_snprintf(out, n, "#%03d %s", number, title);
+        } else {
+            lv_snprintf(out, n, "#%03d %s (their label)", number, th->name);
+        }
+    } else {
+        lv_snprintf(out, n, "%s (their label)", th->name);
+    }
+}
+
 static void goods_next(void);
 
 static void goods_page(int status, const char *body, void *ctx)
@@ -295,6 +375,9 @@ static void goods_page(int status, const char *body, void *ctx)
             snprintf(title, sizeof(title), "#%03d %s", game_jint(e, "number", 0), game_jstr(e, "title"));
             goods_add(true, game_jstr(e, "id"), title, game_jstr(e, "rarity"), game_jint(e, "count", 0));
         }
+    }
+    if (s->goods_items_done) {
+        pagedir_add(cJSON_GetObjectItemCaseSensitive(j, "items"));
     }
     strlcpy(s->goods_cursor, game_jstr(j, "next"), sizeof(s->goods_cursor));
     cJSON_Delete(j);
@@ -337,6 +420,7 @@ static void goods_load(void)
         return;
     }
     s->goods_loading = true;
+    s->dir_started = false;
     s->goods_items_done = false;
     s->goods_pages = 0;
     s->goods_cursor[0] = 0;
@@ -375,18 +459,28 @@ static void picker_close(void)
 // ---------------------------------------------------------------------------
 // Trade screen
 
-static void bundle_text(const trade_bundle_t *b, char *out, size_t n)
+// Our names come from the server; theirs only as their_label() vouches.
+static void bundle_text(const trade_bundle_t *b, bool theirs, char *out, size_t n)
 {
     size_t len = 0;
     out[0] = 0;
     if (b->lamps) {
-        char amt[16];
-        game_fmt_lamps(amt, sizeof(amt), b->lamps);
-        len = snprintf(out, n, "%s !LAMPs", amt);
+        char amt[24];
+        len = snprintf(out, n, "%s", ui_fmt_lamps(amt, sizeof(amt), b->lamps));
     }
     for (int i = 0; i < b->nitems + b->npages && len < n; i++) {
-        const char *name = i < b->nitems ? b->items[i].name : b->pages[i - b->nitems].name;
+        bool page = i >= b->nitems;
+        const trade_thing_t *th = page ? &b->pages[i - b->nitems] : &b->items[i];
+        char name[TRADE_NAME_LEN + 24];
+        if (theirs) {
+            their_label(page, th, name, sizeof(name));
+        } else {
+            strlcpy(name, th->name, sizeof(name));
+        }
         len += snprintf(out + len, n - len, "%s%s", len ? ", " : "", name);
+    }
+    if (!out[0]) {
+        strlcpy(out, "nothing", n);
     }
 }
 
@@ -397,29 +491,33 @@ static void mine_row(int i, ui_row_t *r, void *ctx)
         return;
     }
     switch (i) {
-    case R_LOCK:
+    case R_LOCK: {
+        char line[64] = "";
+        r->title_color = COL_AQUA;
         if (t->phase != TRADE_OPEN) {
-            strlcpy(r->title, t->phase == TRADE_SIGNING ? "Signing..." : "Lock offer", sizeof(r->title));
+            strlcpy(r->title, "Lock offer", sizeof(r->title));
             r->title_color = COL_DIM;
+        } else if (t->can_sign) {
+            strlcpy(r->title, "Sign the trade", sizeof(r->title));
+            strlcpy(line, "Both locked", sizeof(line));
+            strlcpy(r->right, "SELECT sign", sizeof(r->right));
         } else if (t->i_locked) {
             strlcpy(r->title, LV_SYMBOL_OK " Locked", sizeof(r->title));
-            r->title_color = COL_AQUA;
-            snprintf(r->sub, sizeof(r->sub), t->they_locked ? "Signing..." : "Waiting for %s to lock", t->label);
+            snprintf(line, sizeof(line), t->they_locked ? "Signing..." : "Waiting for %s to lock", t->label);
             strlcpy(r->right, "SELECT unlock", sizeof(r->right));
         } else {
             strlcpy(r->title, "Lock offer", sizeof(r->title));
-            r->title_color = COL_AQUA;
-            strlcpy(r->sub, t->they_locked ? "They locked. Lock too and the trade signs" : "When both lock, the trade signs",
-                    sizeof(r->sub));
+            // The joiner's lock is its signature; the inviter signs after both lock.
+            strlcpy(line, t->inviter ? "Lock, then sign once they lock too" : "Locking signs the trade", sizeof(line));
         }
+        strlcpy(r->sub, line, sizeof(r->sub));
         break;
+    }
     case R_LAMPS: {
-        char amt[16], bal[16];
-        game_fmt_lamps(amt, sizeof(amt), t->mine.lamps);
-        game_fmt_lamps(bal, sizeof(bal), balance());
-        snprintf(r->title, sizeof(r->title), "%s !LAMPs", amt);
+        char bal[24];
+        ui_fmt_lamps(r->title, sizeof(r->title), t->mine.lamps);
         r->title_color = COL_LAMPS;
-        snprintf(r->sub, sizeof(r->sub), "You have %s !LAMPs", bal);
+        snprintf(r->sub, sizeof(r->sub), "You have %s", ui_fmt_lamps(bal, sizeof(bal), balance()));
         strlcpy(r->right, LV_SYMBOL_LEFT " " LV_SYMBOL_RIGHT, sizeof(r->right));
         break;
     }
@@ -491,17 +589,19 @@ static void render_trade(bool force)
         return;
     }
     char sig[sizeof(s->sig)];
-    snprintf(sig, sizeof(sig), "%d|%d|%d|%d|%d|%d|%d|%d", t->phase, t->my_rev, t->their_rev, t->i_locked, t->they_locked,
-             t->mine.lamps, t->mine.nitems + t->mine.npages, balance());
+    snprintf(sig, sizeof(sig), "%d|%d|%d|%d|%d|%d|%d|%d|%d%d", t->phase, t->my_rev, t->their_rev, t->i_locked,
+             t->they_locked, t->mine.lamps, t->mine.nitems + t->mine.npages, balance(), t->settled, t->rejected);
     if (!force && !strcmp(sig, s->sig)) {
         return;
     }
     strlcpy(s->sig, sig, sizeof(s->sig));
     lv_label_set_text_fmt(s->title, "Trade with %s", t->label);
 
-    static const char *const phases[] = {"", "INVITED", "OPEN", "SIGNING", "SIGNED", "CANCELLED"};
-    lv_label_set_text(s->phase, phases[t->phase]);
-    lv_obj_set_style_text_color(s->phase, ui_col(t->phase == TRADE_DONE ? COL_GREEN
+    static const char *const phases[] = {"", "INVITED", "OPEN", "WAITING", "SIGNED", "CANCELLED"};
+    lv_label_set_text(s->phase, t->settled ? "SETTLED" : t->rejected ? "REJECTED" : t->unconfirmed ? "PENDING"
+                              : phases[t->phase]);
+    lv_obj_set_style_text_color(s->phase, ui_col(t->rejected ? COL_ERR : t->phase == TRADE_DONE ? COL_GREEN
+                                                 : t->unconfirmed ? COL_YELLOW
                                                  : t->phase == TRADE_CANCELLED ? COL_ERR : COL_DIM), 0);
 
     char text[160];
@@ -512,28 +612,104 @@ static void render_trade(bool force)
         break;
     case TRADE_DONE:
         lv_label_set_text(s->theirs_head, "SIGNED BY BOTH");
-        strlcpy(text, os_api_online() ? "Settling with the server..." : "Settles when either badge syncs", sizeof(text));
+        if (t->settled) {
+            strlcpy(text, LV_SYMBOL_OK " Settled. Everything moved", sizeof(text));
+        } else if (t->rejected) {
+            snprintf(text, sizeof(text), "Rejected: %s", t->reason[0] ? t->reason : "the server said no");
+        } else {
+            strlcpy(text, os_api_online() ? "Settling with the server..." : "Settles when either badge syncs",
+                    sizeof(text));
+        }
         break;
     case TRADE_CANCELLED:
-        lv_label_set_text(s->theirs_head, "CANCELLED");
-        strlcpy(text, t->reason, sizeof(text));
+        if (t->unconfirmed) {
+            // We signed, so the server may still settle it: Trades shows the outcome.
+            lv_label_set_text(s->theirs_head, "SIGNED, NOT CONFIRMED");
+            if (t->settled || t->rejected) {
+                snprintf(text, sizeof(text), "%s. The server %s it after all.", t->reason,
+                         t->settled ? "settled" : "rejected");
+            } else {
+                snprintf(text, sizeof(text), "%s. It may still settle; Trades shows the outcome.", t->reason);
+            }
+        } else {
+            lv_label_set_text(s->theirs_head, "CANCELLED");
+            strlcpy(text, t->reason, sizeof(text));
+        }
+        break;
+    case TRADE_SIGNING:
+        // Our tag is out: the trade can settle now, so there's no cancel.
+        lv_label_set_text(s->theirs_head, "SIGNED");
+        snprintf(text, sizeof(text), "Signed. Waiting for %s", t->label);
         break;
     default:
         lv_label_set_text_fmt(s->theirs_head, "%s GIVES%s", t->label, t->they_locked ? "  " LV_SYMBOL_OK " LOCKED" : "");
-        bundle_text(&t->theirs, text, sizeof(text));
-        if (!text[0]) {
+        if (t->theirs.lamps || t->theirs.nitems || t->theirs.npages) {
+            bundle_text(&t->theirs, true, text, sizeof(text));
+        } else {
             strlcpy(text, "Nothing yet", sizeof(text));
         }
         break;
     }
     lv_label_set_text(s->theirs, text);
     lv_obj_set_style_text_color(s->theirs_head, ui_col(t->they_locked ? COL_AQUA : COL_DIM), 0);
-    bool open = t->phase == TRADE_OPEN || t->phase == TRADE_SIGNING;
+    bool open = t->phase == TRADE_OPEN;
     ui_list_show(s->mine, open);
     if (open) {
         ui_list_set_count(s->mine, R_FIXED + t->mine.nitems + t->mine.npages);
     }
     set_hint();
+}
+
+// Inviter, both locked: the deliberate step that sends our signature.
+static void sign_confirmed(bool yes, void *ctx)
+{
+    const trade_view_t *t = trade_current();
+    if (!s || !t || !t->can_sign) {
+        return;
+    }
+    if (!yes) {
+        trade_lock(false);              // not now: unlock, so they see it
+    } else if (t->my_rev != s->ask_mine || t->their_rev != s->ask_theirs) {
+        os_toast("The offers changed. Check them and lock again");
+        return;
+    } else {
+        trade_sign();
+    }
+    render_trade(false);
+}
+
+// The confirm repeats both offers as they stand, and remembers their
+// revisions: a yes only counts for exactly what it showed.
+static void ask(const trade_view_t *t, const char *question, os_confirm_cb_t done)
+{
+    trade_flush();
+    char mine[72], theirs[72], q[300];
+    bundle_text(&t->mine, false, mine, sizeof(mine));
+    bundle_text(&t->theirs, true, theirs, sizeof(theirs));
+    lv_snprintf(q, sizeof(q), "You give: %s\n%s gives: %s\n\n%s", mine, t->label, theirs, question);
+    s->ask_mine = t->my_rev;
+    s->ask_theirs = t->their_rev;
+    os_confirm(q, done, NULL);
+}
+
+static void ask_sign(const trade_view_t *t)
+{
+    s->sign_asked = true;
+    ask(t, "Sign the trade? Once you sign, it can settle even if you cancel.", sign_confirmed);
+}
+
+static void lock_confirmed(bool yes, void *ctx)
+{
+    const trade_view_t *t = trade_current();
+    if (!yes || !s || !t) {
+        return;
+    }
+    if (t->my_rev != s->ask_mine || t->their_rev != s->ask_theirs) {
+        os_toast("The offers changed. Check them and lock again");
+        return;
+    }
+    trade_lock(true);
+    render_trade(false);
 }
 
 static bool trade_key(os_key_t k, bool repeat)
@@ -550,7 +726,10 @@ static bool trade_key(os_key_t k, bool repeat)
         return true;
     }
     if (k == OS_KEY_BACK) {
-        if (repeat || t->phase == TRADE_SIGNING) {
+        if (t->phase == TRADE_SIGNING) {
+            return repeat;              // leave; the signed trade is recorded on exit
+        }
+        if (repeat) {
             return true;
         }
         int64_t now = game_now_ms();
@@ -589,7 +768,16 @@ static bool trade_key(os_key_t k, bool repeat)
     }
     switch (sel) {
     case R_LOCK:
-        trade_lock(!t->i_locked);
+        if (t->can_sign) {
+            ask_sign(t);
+        } else if (t->i_locked) {
+            trade_lock(false);
+        } else if (t->inviter) {
+            trade_lock(true);           // nothing is signed until trade_sign()
+        } else {
+            // The joiner signs as soon as the terms arrive: this is its commitment.
+            ask(t, "Locking signs the trade. Once you both lock, it can settle even if you cancel.", lock_confirmed);
+        }
         break;
     case R_LAMPS:
         break;
@@ -657,11 +845,11 @@ static void set_hint(void)
             h = "CANCEL x2 cancel";
             break;
         case TRADE_SIGNING:
-            h = "Signing...";
+            h = "CANCEL leave";
             break;
         default:
             h = sel == R_LAMPS ? LV_SYMBOL_LEFT LV_SYMBOL_RIGHT " amount  CANCEL x2 cancel"
-              : sel == R_LOCK  ? "SELECT lock / unlock  CANCEL x2 cancel"
+              : sel == R_LOCK  ? (t->can_sign ? "SELECT sign  CANCEL x2 cancel" : "SELECT lock / unlock  CANCEL x2 cancel")
               : sel == R_ADD   ? "SELECT add  CANCEL x2 cancel"
                                : "SELECT remove  CANCEL x2 cancel";
             break;
@@ -676,6 +864,33 @@ static void set_hint(void)
     lv_label_set_text(s->hint, h);
 }
 
+// Trading needs the radio on the mesh channel, which pauses Wi-Fi joined on
+// another channel. Load what you can offer first in that case, so the picker
+// has it while the server is out of reach.
+static bool goods_first(void)
+{
+    os_wifi_info_t w;
+    os_wifi_get_info(&w);
+    if (!os_api_online() || w.channel == os_mesh_channel() || !(s->goods = calloc(GOODS_MAX, sizeof(good_t)))) {
+        return false;
+    }
+    goods_from_cache();
+    int64_t now = os_cloud_time_ms();
+    if (s->goods_at && now && now - s->goods_at < GOODS_FRESH_MS) {
+        return false;
+    }
+    goods_load();
+    return s->goods_loading;
+}
+
+static void radio_on(void)
+{
+    if (!s->acquired) {
+        s->acquired = true;
+        os_mesh_acquire();
+    }
+}
+
 static void enter(lv_obj_t *root)
 {
     s = calloc(1, sizeof(*s));
@@ -683,7 +898,10 @@ static void enter(lv_obj_t *root)
         ui_label(root, &sol_font_14, COL_ERR, "Out of memory");
         return;
     }
-    os_mesh_acquire();
+    s->opened = game_now_ms();
+    if (!goods_first()) {
+        radio_on();
+    }
     s->root = root;
     s->home = lv_obj_create(root);
     lv_obj_remove_style_all(s->home);
@@ -693,6 +911,9 @@ static void enter(lv_obj_t *root)
     s->list = ui_list_create(s->home, LIST_Y, LIST_H, home_row, NULL);
     s->hint = ui_hint(root, "");
     show_tab(TAB_NEARBY);
+    if (!os_data_ready()) {
+        os_toast("No microSD card: unsent trades are lost on reboot");
+    }
     if (trade_current()) {
         trade_open_screen();            // e.g. a finished trade not yet dismissed
     }
@@ -705,7 +926,9 @@ static void leave(void)
     }
     trade_dismiss();                    // cancels an open trade; the peer is told
     os_api_cancel(s);
-    os_mesh_release();
+    if (s->acquired) {
+        os_mesh_release();
+    }
     free(s->recs);
     free(s->goods);
     free(s);
@@ -765,6 +988,10 @@ static void on_tick(void)
         return;
     }
     s->tick++;
+    if (!s->acquired && (!s->goods_loading || game_now_ms() - s->opened > GOODS_WAIT_MS)) {
+        radio_on();
+        show_tab(s->tab);
+    }
     if (s->view == V_HOME) {
         const trade_view_t *t = trade_current();
         if (t && t->phase != TRADE_IDLE) {
@@ -779,6 +1006,13 @@ static void on_tick(void)
         }
     } else if (s->view == V_TRADE && s->tick % 3 == 0) {
         render_trade(false);
+        // Both locked: ask the inviter to sign, once per pair of locks.
+        const trade_view_t *t = trade_current();
+        if (t && !t->can_sign) {
+            s->sign_asked = false;
+        } else if (t && !s->sign_asked && !os_confirm_open()) {
+            ask_sign(t);
+        }
     }
 }
 

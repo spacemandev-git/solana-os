@@ -11,6 +11,8 @@
 #include "core/os.h"
 #include "core/os_api.h"
 #include "core/os_cloud.h"
+#include "core/os_data.h"
+#include "core/os_wifi.h"
 #include "core/ui.h"
 #include "game/xdex.h"
 
@@ -20,6 +22,7 @@
 #define PEERS_MAX   16
 #define CARDS_MAX   64
 #define REFRESH_MS  1000
+#define SYNC_WAIT_MS 8000       // longest the radio waits for the Yearbook sync
 
 enum { TAB_NEARBY, TAB_YEARBOOK };
 static const char *const tab_names[] = {"Nearby", "Yearbook"};
@@ -30,6 +33,10 @@ typedef struct {
     int tab;
     int tick;
     xdex_phase_t phase;     // last seen, to reload the Yearbook after a swap
+    bool card;              // microSD card present (checked on enter)
+    bool acquired;          // holding the mesh radio
+    bool me_pending;        // GET /api/device/me in flight
+    int64_t opened;
     // Nearby
     os_mesh_peer_t peers[PEERS_MAX];
     int npeers, npending;
@@ -149,6 +156,8 @@ static void status_render(void)
     } else if (!in->has_key) {
         strlcpy(line, "Turn on Wi-Fi once so the badge can get its key", sizeof(line));
         col = COL_WARN;
+    } else if (!s->acquired) {
+        strlcpy(line, "Syncing your Yearbook...", sizeof(line));
     } else if (!os_mesh_ready()) {
         strlcpy(line, "Starting the radio...", sizeof(line));
     } else {
@@ -195,7 +204,13 @@ static void status_render(void)
             }
             break;
         default:
-            strlcpy(line, s->tab == TAB_NEARBY ? "Hold two badges close and swap cards" : "", sizeof(line));
+            if (!s->card) {
+                // HHGTS.md: without a card, swaps live in RAM until they upload.
+                strlcpy(line, "No microSD card: unsent swaps are lost on reboot", sizeof(line));
+                col = COL_WARN;
+            } else {
+                strlcpy(line, s->tab == TAB_NEARBY ? "Hold two badges close and swap cards" : "", sizeof(line));
+            }
             break;
         }
     }
@@ -301,6 +316,7 @@ static void got_page(int status, const char *body, void *ctx)
 
 static void got_me(int status, const char *body, void *ctx)
 {
+    s->me_pending = false;
     if (status != 200) {
         return;
     }
@@ -352,7 +368,7 @@ static void yearbook_load(void)
     yearbook_show();
     if (os_api_online()) {
         load_more();
-        os_api_call("GET", "/api/device/me", NULL, 0, got_me, s);
+        s->me_pending = os_api_call("GET", "/api/device/me", NULL, 0, got_me, s) == ESP_OK;
     }
 }
 
@@ -387,7 +403,7 @@ static void show_tab(int tab)
 {
     s->tab = tab;
     ui_tabs_select(s->tabs, tab);
-    ui_list_select(s->list, 0);
+    ui_list_set_count(s->list, 0);      // the rows belong to the other tab until it reloads
     if (tab == TAB_NEARBY) {
         ui_list_set_empty(s->list, "No badges nearby yet. Badges show up here when they're in range.");
         nearby_refresh();
@@ -407,8 +423,9 @@ static void enter(lv_obj_t *root)
         ui_label(root, &sol_font_14, COL_ERR, "Out of memory");
         return;
     }
-    os_mesh_acquire();
     s->next_bounty = -1;
+    s->card = os_data_ready();
+    s->opened = game_now_ms();
     s->tabs = ui_tabs(root, tab_names, 2);
     s->status = ui_label(root, &sol_mono_12, COL_DIM, "");
     lv_obj_set_pos(s->status, 8, UI_TABS_H + 3);
@@ -417,6 +434,13 @@ static void enter(lv_obj_t *root)
     s->list = ui_list_create(root, LIST_Y, LIST_H, row, NULL);
     s->hint = ui_hint(root, "");
     yearbook_load();                    // also marks "in your Yearbook" on Nearby
+    // The mesh pauses Wi-Fi joined on another channel: sync the Yearbook first.
+    os_wifi_info_t w;
+    os_wifi_get_info(&w);
+    if (!os_api_online() || w.channel == os_mesh_channel()) {
+        s->acquired = true;
+        os_mesh_acquire();
+    }
     show_tab(TAB_NEARBY);
 }
 
@@ -426,7 +450,9 @@ static void leave(void)
         return;
     }
     os_api_cancel(s);
-    os_mesh_release();
+    if (s->acquired) {
+        os_mesh_release();
+    }
     free(s->cards);
     free(s);
     s = NULL;
@@ -485,6 +511,10 @@ static void on_tick(void)
 {
     if (!s) {
         return;
+    }
+    if (!s->acquired && ((!s->loading && !s->me_pending) || game_now_ms() - s->opened > SYNC_WAIT_MS)) {
+        s->acquired = true;
+        os_mesh_acquire();
     }
     if (++s->tick % (REFRESH_MS / OS_TICK_MS) == 0 && s->tab == TAB_NEARBY) {
         nearby_refresh();

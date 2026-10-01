@@ -3,12 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "bsp.h"
 #include "core/os.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
+#include "core/ui.h"
 #include "game.h"
 
 static const char *TAG = "game";
@@ -17,6 +19,19 @@ static esp_timer_handle_t s_tick_timer, s_led_timer;
 static volatile bool s_tick_queued;
 static char s_id[OS_MESH_ID_LEN + 1];
 static bool s_claimed;
+
+// What the mesh task lets through (see on_mesh), under s_filter_mux: the mesh
+// task reads it, the OS task writes it.
+#define HOPS_MAX    4               // messages per type waiting for the OS task
+static portMUX_TYPE s_filter_mux = portMUX_INITIALIZER_UNLOCKED;
+typedef struct {
+    char id[OS_MESH_ID_LEN + 1];
+    char tid[17];
+    char beacon[OS_MESH_ID_LEN + 1];
+    int rid;
+} filter_t;
+static filter_t s_filter;
+static int s_hops[OS_MESH_TYPE_MAX];
 
 int64_t game_now_ms(void)
 {
@@ -34,6 +49,9 @@ static void tick(void *arg)
         os_cloud_get_info(in);
         strlcpy(s_id, in->id, sizeof(s_id));
         s_claimed = in->claimed;
+        portENTER_CRITICAL(&s_filter_mux);
+        strlcpy(s_filter.id, s_id, sizeof(s_filter.id));
+        portEXIT_CRITICAL(&s_filter_mux);
         free(in);
     }
     int64_t now = game_now_ms();
@@ -58,9 +76,27 @@ typedef struct {
     char json[];
 } hop_t;
 
+void game_expect_trade(const char *tid)
+{
+    portENTER_CRITICAL(&s_filter_mux);
+    strlcpy(s_filter.tid, tid ? tid : "", sizeof(s_filter.tid));
+    portEXIT_CRITICAL(&s_filter_mux);
+}
+
+void game_expect_relay(const char *beacon, int rid)
+{
+    portENTER_CRITICAL(&s_filter_mux);
+    strlcpy(s_filter.beacon, beacon ? beacon : "", sizeof(s_filter.beacon));
+    s_filter.rid = rid;
+    portEXIT_CRITICAL(&s_filter_mux);
+}
+
 static void deliver(void *arg)
 {
     hop_t *h = arg;
+    portENTER_CRITICAL(&s_filter_mux);
+    s_hops[h->type]--;
+    portEXIT_CRITICAL(&s_filter_mux);
     cJSON *msg = cJSON_Parse(h->json);
     if (cJSON_IsObject(msg)) {
         switch (h->type) {
@@ -76,19 +112,68 @@ static void deliver(void *arg)
     free(h);
 }
 
-// Mesh task: copy and hop over to the OS task.
+// The string value of "key" in a flat JSON object equals want (n chars).
+// Escaped quotes inside other strings can't fake the pattern, so a miss is
+// a real miss; the OS task parses and checks everything again anyway.
+static bool json_has(const char *json, const char *key, const char *want)
+{
+    char pat[12] = "\"";
+    strlcat(pat, key, sizeof(pat));
+    strlcat(pat, "\":\"", sizeof(pat));
+    const char *p = strstr(json, pat);
+    size_t n = strlen(want), at = strlen(pat);
+    return p && n && !strncmp(p + at, want, n) && p[at + n] == '"';
+}
+
+// Mesh task: drop what isn't for us, copy the rest and hop over to the OS
+// task. A flood of messages for other badges (or of fakes) must not fill
+// the OS queue that buttons and API answers share, so at most HOPS_MAX per
+// type wait there at a time.
 static void on_mesh(os_mesh_type_t type, const os_mesh_peer_t *from, const char *json, void *ctx)
 {
-    size_t len = strlen(json);
-    hop_t *h = malloc(sizeof(hop_t) + len + 1);
-    if (!h) {
+    filter_t f;
+    portENTER_CRITICAL(&s_filter_mux);
+    f = s_filter;
+    portEXIT_CRITICAL(&s_filter_mux);
+    bool want;
+    switch (type) {
+    case OS_MESH_XDEX:
+        want = json_has(json, "to", f.id);
+        break;
+    case OS_MESH_TRADE:
+        // invite / join / decline name us; the rest name the open trade.
+        want = strstr(json, "\"to\":\"") ? json_has(json, "to", f.id) : json_has(json, "tid", f.tid);
+        break;
+    case OS_MESH_RELAY_RESP: {
+        const char *rid = strstr(json, "\"rid\":");
+        want = rid && f.beacon[0] && !strcmp(from->id, f.beacon) && atoi(rid + 6) == f.rid;
+        break;
+    }
+    default:
+        want = false;
+        break;
+    }
+    portENTER_CRITICAL(&s_filter_mux);
+    want = want && s_hops[type] < HOPS_MAX;
+    if (want) {
+        s_hops[type]++;
+    }
+    portEXIT_CRITICAL(&s_filter_mux);
+    if (!want) {
         return;
     }
-    h->type = type;
-    h->from = *from;
-    memcpy(h->json, json, len + 1);
-    if (!os_post(deliver, h)) {
+    size_t len = strlen(json);
+    hop_t *h = malloc(sizeof(hop_t) + len + 1);
+    if (h) {
+        h->type = type;
+        h->from = *from;
+        memcpy(h->json, json, len + 1);
+    }
+    if (!h || !os_post(deliver, h)) {
         free(h);
+        portENTER_CRITICAL(&s_filter_mux);
+        s_hops[type]--;
+        portEXIT_CRITICAL(&s_filter_mux);
     }
 }
 
@@ -166,19 +251,6 @@ void game_ascii(char *out, size_t n, const char *in)
         }
     }
     out[j] = 0;
-}
-
-void game_fmt_lamps(char *out, size_t n, int lamps)
-{
-    unsigned v = lamps < 0 ? -lamps : lamps;
-    const char *sign = lamps < 0 ? "-" : "";
-    if (v >= 1000000) {
-        snprintf(out, n, "%s%u,%03u,%03u", sign, v / 1000000, v / 1000 % 1000, v % 1000);
-    } else if (v >= 1000) {
-        snprintf(out, n, "%s%u,%03u", sign, v / 1000, v % 1000);
-    } else {
-        snprintf(out, n, "%s%u", sign, v);
-    }
 }
 
 void game_peer_label(const char *name, const char *id, char *out, size_t n)
@@ -260,16 +332,8 @@ void game_synced(int64_t at_ms, char *out, size_t n)
         strlcpy(out, "saved copy", n);
         return;
     }
-    int min = (int)((now - at_ms) / 60000);
-    if (min < 1) {
-        strlcpy(out, "synced just now", n);
-    } else if (min < 60) {
-        snprintf(out, n, "synced %d min ago", min);
-    } else if (min < 48 * 60) {
-        snprintf(out, n, "synced %d h ago", min / 60);
-    } else {
-        snprintf(out, n, "synced %d days ago", min / (24 * 60));
-    }
+    char ago[24];
+    snprintf(out, n, "synced %s", ui_fmt_ago(ago, sizeof(ago), now - at_ms));
 }
 
 // ---------------------------------------------------------------------------
