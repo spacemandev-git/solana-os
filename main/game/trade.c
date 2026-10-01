@@ -289,6 +289,11 @@ static void outcome(const char *body, bool toast)
     if (is_hex16(tid) && (!strcmp(status, "settled") || !strcmp(status, "rejected"))) {
         const char *reason = game_jstr(j, "reason");
         append_status(tid, status, reason);
+        if (s_t && !strcmp(s_t->v.tid, tid)) {
+            s_t->v.settled = status[0] == 's';
+            s_t->v.rejected = !s_t->v.settled;
+            strlcpy(s_t->v.reason, reason, sizeof(s_t->v.reason));
+        }
         if (toast) {
             if (status[0] == 's') {
                 os_toast("Trade settled");

@@ -49,7 +49,8 @@ typedef struct {
     trade_bundle_t mine, theirs;
     int my_rev, their_rev;
     bool i_locked, they_locked;         // valid for the current revisions
-    char reason[48];                    // why it was cancelled
+    bool settled, rejected;             // the server's answer, once it came (TRADE_DONE)
+    char reason[48];                    // why it was cancelled or rejected
 } trade_view_t;
 
 typedef struct {

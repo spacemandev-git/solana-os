@@ -497,8 +497,8 @@ static void render_trade(bool force)
         return;
     }
     char sig[sizeof(s->sig)];
-    snprintf(sig, sizeof(sig), "%d|%d|%d|%d|%d|%d|%d|%d", t->phase, t->my_rev, t->their_rev, t->i_locked, t->they_locked,
-             t->mine.lamps, t->mine.nitems + t->mine.npages, balance());
+    snprintf(sig, sizeof(sig), "%d|%d|%d|%d|%d|%d|%d|%d|%d%d", t->phase, t->my_rev, t->their_rev, t->i_locked,
+             t->they_locked, t->mine.lamps, t->mine.nitems + t->mine.npages, balance(), t->settled, t->rejected);
     if (!force && !strcmp(sig, s->sig)) {
         return;
     }
@@ -506,8 +506,8 @@ static void render_trade(bool force)
     lv_label_set_text_fmt(s->title, "Trade with %s", t->label);
 
     static const char *const phases[] = {"", "INVITED", "OPEN", "SIGNING", "SIGNED", "CANCELLED"};
-    lv_label_set_text(s->phase, phases[t->phase]);
-    lv_obj_set_style_text_color(s->phase, ui_col(t->phase == TRADE_DONE ? COL_GREEN
+    lv_label_set_text(s->phase, t->settled ? "SETTLED" : t->rejected ? "REJECTED" : phases[t->phase]);
+    lv_obj_set_style_text_color(s->phase, ui_col(t->rejected ? COL_ERR : t->phase == TRADE_DONE ? COL_GREEN
                                                  : t->phase == TRADE_CANCELLED ? COL_ERR : COL_DIM), 0);
 
     char text[160];
@@ -518,7 +518,14 @@ static void render_trade(bool force)
         break;
     case TRADE_DONE:
         lv_label_set_text(s->theirs_head, "SIGNED BY BOTH");
-        strlcpy(text, os_api_online() ? "Settling with the server..." : "Settles when either badge syncs", sizeof(text));
+        if (t->settled) {
+            strlcpy(text, LV_SYMBOL_OK " Settled. Everything moved", sizeof(text));
+        } else if (t->rejected) {
+            snprintf(text, sizeof(text), "Rejected: %s", t->reason[0] ? t->reason : "the server said no");
+        } else {
+            strlcpy(text, os_api_online() ? "Settling with the server..." : "Settles when either badge syncs",
+                    sizeof(text));
+        }
         break;
     case TRADE_CANCELLED:
         lv_label_set_text(s->theirs_head, "CANCELLED");
