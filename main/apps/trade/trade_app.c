@@ -118,13 +118,9 @@ static void home_row(int i, ui_row_t *r, void *ctx)
         if (t->status == TRADE_REC_REJECTED && t->reason[0]) {
             snprintf(r->sub, sizeof(r->sub), "%s", t->reason);
         } else if (t->status == TRADE_REC_UNCONFIRMED) {
-            char line[64];
-            snprintf(line, sizeof(line), "Waiting for %s's badge to sync", t->label);
-            game_clip(r->sub, sizeof(r->sub), line);
+            lv_snprintf(r->sub, sizeof(r->sub), "Waiting for %s's badge to sync", t->label);
         } else {
-            char line[112];
-            lv_snprintf(line, sizeof(line), "Gave %s, got %s", t->gave, t->got);
-            game_clip(r->sub, sizeof(r->sub), line);
+            lv_snprintf(r->sub, sizeof(r->sub), "Gave %s, got %s", t->gave, t->got);
         }
         strlcpy(r->right, status_word(t->status, &r->right_color), sizeof(r->right));
         return;
@@ -429,7 +425,7 @@ static void mine_row(int i, ui_row_t *r, void *ctx)
             // The joiner's lock is its signature; the inviter signs after both lock.
             strlcpy(line, t->inviter ? "Lock, then sign once they lock too" : "Locking signs the trade", sizeof(line));
         }
-        game_clip(r->sub, sizeof(r->sub), line);
+        strlcpy(r->sub, line, sizeof(r->sub));
         break;
     }
     case R_LAMPS: {

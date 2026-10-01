@@ -169,21 +169,6 @@ void game_ascii(char *out, size_t n, const char *in)
     out[j] = 0;
 }
 
-void game_clip(char *out, size_t n, const char *in)
-{
-    size_t max = n - 1 < GAME_SUB_CHARS ? n - 1 : GAME_SUB_CHARS;
-    size_t len = strlen(in);
-    if (len <= max) {
-        strlcpy(out, in, n);
-        return;
-    }
-    size_t cut = max - 3;
-    while (cut && in[cut - 1] == ' ') {
-        cut--;
-    }
-    snprintf(out, n, "%.*s...", (int)cut, in);
-}
-
 void game_peer_label(const char *name, const char *id, char *out, size_t n)
 {
     if (name && name[0]) {

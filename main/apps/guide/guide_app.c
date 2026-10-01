@@ -835,7 +835,7 @@ static void row(int i, ui_row_t *r, void *ctx)
     case TAB_SHOP: {
         const item_t *it = &s->items[i];
         strlcpy(r->title, it->name, sizeof(r->title));
-        game_clip(r->sub, sizeof(r->sub), it->desc);
+        strlcpy(r->sub, it->desc, sizeof(r->sub));
         if (it->available) {
             ui_fmt_lamps(r->right, sizeof(r->right), it->price);
             r->right_color = COL_LAMPS;

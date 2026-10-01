@@ -71,9 +71,7 @@ static void row(int i, ui_row_t *r, void *ctx)
     strlcpy(r->title, e->title, sizeof(r->title));
     r->title_color = status_color(e->status);
     if (!strcmp(e->status, "active") && e->step[0]) {
-        char line[96];
-        snprintf(line, sizeof(line), "%s%s%s", e->step, e->at[0] ? " @ " : "", e->at);
-        game_clip(r->sub, sizeof(r->sub), line);
+        lv_snprintf(r->sub, sizeof(r->sub), "%s%s%s", e->step, e->at[0] ? " @ " : "", e->at);
     } else if (!strcmp(e->status, "locked")) {
         strlcpy(r->sub, "Finish other quests first", sizeof(r->sub));
     } else {
