@@ -65,6 +65,17 @@ const char *lua_pkg_symbol(const char *icon)
     return LV_SYMBOL_PLAY;
 }
 
+void lua_pkg_plain(char *out, size_t n, const char *in)
+{
+    size_t o = 0;
+    for (; in && *in && o + 1 < n; in++) {
+        if (*in >= 0x20 && *in <= 0x7E) {
+            out[o++] = *in;
+        }
+    }
+    out[o] = 0;
+}
+
 bool lua_pkg_valid_id(const char *id)
 {
     size_t n = id ? strlen(id) : 0;
@@ -85,10 +96,31 @@ void lua_pkg_rel(char *out, size_t n, const char *id, const char *file)
     snprintf(out, n, "apps/%s/%s", id, file);
 }
 
+// Manifest text shows in titles, lists and dialogs: drop control characters
+// (a newline in a name must not add a line anywhere), and don't cut a UTF-8
+// character in half.
 static void copy_str(const cJSON *obj, const char *key, char *out, size_t n)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
-    strlcpy(out, cJSON_IsString(v) ? v->valuestring : "", n);
+    const char *in = cJSON_IsString(v) ? v->valuestring : "";
+    size_t o = 0;
+    for (; *in && o + 1 < n; in++) {
+        if ((unsigned char)*in >= 0x20 && *in != 0x7F) {
+            out[o++] = *in;
+        }
+    }
+    size_t start = o;
+    while (start > 0 && ((unsigned char)out[start - 1] & 0xC0) == 0x80) {
+        start--;
+    }
+    if (start > 0 && (unsigned char)out[start - 1] >= 0xC0) {
+        unsigned char lead = out[start - 1];
+        size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+        if (o - (start - 1) < need) {
+            o = start - 1;      // the last character didn't fit
+        }
+    }
+    out[o] = 0;
 }
 
 bool lua_pkg_parse(const char *json, const char *want_id, lua_pkg_t *out)

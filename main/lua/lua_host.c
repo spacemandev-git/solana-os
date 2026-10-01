@@ -28,7 +28,10 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_lvgl_port.h"
+#include "core/os_api.h"
+#include "core/os_cloud.h"
 #include "core/os_data.h"
+#include "core/os_http.h"
 #include "vendor/lualib.h"
 #include "lua_priv.h"
 
@@ -44,6 +47,8 @@ static const char *TAG = "lua";
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
 #define LH_READ_CHUNK       256
+#define LH_PREWARM_MS       4000        // longest wait for the server connection at launch
+#define LH_SERVER_PERMS     (LUA_PERM_LAMPS | LUA_PERM_ITEMS | LUA_PERM_PROFILE | LUA_PERM_QUEST)
 
 SemaphoreHandle_t lh_mx;
 lh_t *lh_cur;
@@ -111,19 +116,53 @@ static void *lh_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
     return p;
 }
 
+static void step_hook(lua_State *L, lua_Debug *ar);
+
+// Over budget: from now on every thread fails at every instruction, so
+// neither pcall() nor a coroutine can keep the script going; a callback that
+// still returns normally is failed by lh_callback. level: where to report.
+static int over_budget(lua_State *L, int level)
+{
+    lh_t *s = lh_get(L);
+    s->killed = true;
+    lua_sethook(L, step_hook, LUA_MASKCOUNT, 1);
+    if (s->L && s->L != L) {
+        lua_sethook(s->L, step_hook, LUA_MASKCOUNT, 1);
+    }
+    luaL_where(L, level);
+    lua_pushliteral(L, "Script took too long");
+    lua_concat(L, 2);
+    if (!s->kill_msg[0]) {
+        strlcpy(s->kill_msg, lua_tostring(L, -1), sizeof(s->kill_msg));
+    }
+    return lua_error(L);
+}
+
 static void step_hook(lua_State *L, lua_Debug *ar)
 {
     lh_t *s = lh_get(L);
     s->steps += LH_HOOK_EVERY;
     if (s->steps > LUA_HOST_STEPS_MAX) {
-        // From now on fail at every instruction, so pcall() can't keep it going.
-        s->killed = true;
-        lua_sethook(L, step_hook, LUA_MASKCOUNT, 1);
-        luaL_where(L, 0);       // level 0: the script line running now
-        lua_pushliteral(L, "Script took too long");
-        lua_concat(L, 2);
-        lua_error(L);
+        over_budget(L, 0);      // level 0: the script line running now
     }
+}
+
+// Work done in C (pattern matching, vendor/lstrlib.c) counts too.
+void lh_charge_steps(lua_State *L, unsigned int n)
+{
+    lh_t *s = lh_get(L);
+    s->steps += n;
+    if (s->steps > LUA_HOST_STEPS_MAX) {
+        over_budget(L, 1);      // level 1: the line that called string.find & co.
+    }
+}
+
+// Every coroutine counts against the same budget (the extra space, and so
+// lh_get, is shared). Threads copy the creator's hook anyway; arming it here
+// doesn't depend on that.
+void lh_thread_new(lua_State *L1)
+{
+    lua_sethook(L1, step_hook, LUA_MASKCOUNT, LH_HOOK_EVERY);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +207,9 @@ static void close_state(lh_t *s)
     s->L = NULL;
 }
 
-// The script failed with rc and its error on the stack. LVGL lock held.
-static void fail(lh_t *s, int rc)
+// The script failed with rc and its error on the stack (or in msg_in).
+// LVGL lock held.
+static void fail(lh_t *s, int rc, const char *msg_in)
 {
     lua_State *L = s->L;
     char msg[200];
@@ -179,7 +219,12 @@ static void fail(lh_t *s, int rc)
         snprintf(msg, sizeof(msg), s->mem_hit ? "The app needs more than %d KB." : "The badge is low on memory.",
                  LUA_HOST_HEAP_MAX / 1024);
     } else {
-        strlcpy(msg, lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "(error is not a string)", sizeof(msg));
+        // Over budget: report where it ran out, not how the error travelled.
+        if (s->killed && s->kill_msg[0]) {
+            msg_in = s->kill_msg;
+        }
+        strlcpy(msg, msg_in ? msg_in : lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1)
+                     : "(error is not a string)", sizeof(msg));
         if (s->killed) {
             title = "Script took too long";
         }
@@ -203,11 +248,17 @@ bool lh_callback(lh_t *s, lua_CFunction fn, void *arg)
         return false;
     }
     s->steps = 0;
+    s->kill_msg[0] = 0;
     lua_pushcfunction(L, fn);
     lua_pushlightuserdata(L, arg);
     int rc = lua_pcall(L, 1, 0, 0);
     if (s->steps > s->steps_peak) {
         s->steps_peak = s->steps;
+    }
+    if (rc == LUA_OK && s->killed) {
+        // The budget ran out inside a coroutine or pcall that swallowed it.
+        fail(s, LUA_ERRRUN, s->kill_msg);
+        return false;
     }
     if (rc != LUA_OK) {
         if (s->ui_off) {
@@ -216,7 +267,7 @@ bool lh_callback(lh_t *s, lua_CFunction fn, void *arg)
             lua_settop(L, 0);
             return false;
         }
-        fail(s, rc);
+        fail(s, rc, NULL);
         return false;
     }
     lh_led_flush(s);
@@ -447,6 +498,30 @@ static void task_end(lh_t *s)
     vTaskDelete(NULL);
 }
 
+// An app that talks to the server: open the server connection before the
+// script allocates, so the TLS handshake (~35 KB, much of it in one block)
+// gets the big free blocks. Later calls reuse the connection.
+static void prewarm(lh_t *s)
+{
+    if (!(s->pkg.perms & LH_SERVER_PERMS) || !os_api_online() || os_http_connected()) {
+        return;
+    }
+    // The prewarm is a hello from the cloud task: wait for it to start and
+    // finish (or for the connection), at most LH_PREWARM_MS.
+    os_api_prewarm();
+    os_cloud_info_t in;
+    bool seen = false;
+    for (int ms = 0; ms < LH_PREWARM_MS && !s->quit && !os_http_connected(); ms += 50) {
+        os_cloud_get_info(&in);
+        if (in.busy) {
+            seen = true;
+        } else if (seen || ms >= 500) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static void lua_task(void *arg)
 {
     lh_t *s = arg;
@@ -457,6 +532,7 @@ static void lua_task(void *arg)
     s_stack_low = bottom + LH_STACK_LOW;
     s_stack_crit = bottom + LH_STACK_CRIT;
     char rel[64], path[160];
+    prewarm(s);
     lua_pkg_rel(rel, sizeof(rel), s->pkg.id, "main.lua");
     os_data_path(path, sizeof(path), rel);
     reader_t *rd = malloc(sizeof(*rd));
@@ -480,11 +556,13 @@ static void lua_task(void *arg)
     ESP_LOGI(TAG, "%s: booted (%u bytes of Lua heap)", s->pkg.id, (unsigned)s->mem);
 
     if (lock(s)) {
+        lv_obj_delete(s->loading);
+        s->loading = NULL;
         if (!s->L) {
             s->failed = true;
             show_error(s, "Out of memory", "Not enough memory to start the app.");
         } else if (rc != LUA_OK) {
-            fail(s, rc);
+            fail(s, rc, NULL);
         } else {
             s->next_tick = lh_now() + LH_TICK_MS;
             lh_callback(s, run_main, NULL);
@@ -554,6 +632,8 @@ static void host_enter(lv_obj_t *root)
     s->t0 = lh_now();
     s->area = area;
     s->modal_ref = s->store_ref = LUA_NOREF;
+    s->loading = ui_label(area, &sol_font_14, COL_DIM, "Starting...");
+    lv_obj_center(s->loading);
     s->heap_before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     xSemaphoreTake(s_done, 0);
     xSemaphoreTake(lh_mx, portMAX_DELAY);
@@ -569,6 +649,8 @@ static void host_enter(lv_obj_t *root)
         s->finished = true;
         xSemaphoreGive(lh_mx);
         s->failed = true;
+        lv_obj_delete(s->loading);
+        s->loading = NULL;
         show_error(s, "Out of memory", "Not enough memory to start the app.");
     }
 }

@@ -75,3 +75,7 @@ const char *lua_perm_text(int bit_index);
 uint32_t lua_perm_parse(const char *name);     // 0 if unknown
 
 const char *lua_pkg_symbol(const char *icon);  // LV_SYMBOL_* (never NULL)
+
+// App-supplied text for an OS confirm dialog: printable ASCII only, cut to
+// fit, so it can't add lines or restructure the question.
+void lua_pkg_plain(char *out, size_t n, const char *in);

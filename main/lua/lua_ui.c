@@ -115,16 +115,43 @@ static lh_obj_t *new_obj(lua_State *L, lh_t *s, lh_kind_t kind, lv_obj_t *obj)
     return NULL;
 }
 
-static void free_obj(lua_State *L, lh_obj_t *o)
+static void free_obj(lua_State *L, lh_t *s, lh_obj_t *o)
 {
     if (L) {
         luaL_unref(L, LUA_REGISTRYINDEX, o->items_ref);
         luaL_unref(L, LUA_REGISTRYINDEX, o->select_ref);
     }
+    s->text_total -= o->text_len;
+    o->text_len = 0;
     o->obj = NULL;
     o->list = NULL;
     o->items_ref = o->select_ref = LUA_NOREF;
     o->gen++;
+}
+
+// LVGL copies label text onto the system heap, outside the script's 48 KB,
+// so each label holds at most LH_TEXT_MAX bytes (cut at a character, with
+// "...") and all of them together LH_TEXT_TOTAL.
+static void clip_text(char out[LH_TEXT_MAX + 1], const char *in)
+{
+    size_t n = strlen(in);
+    if (n <= LH_TEXT_MAX) {
+        memcpy(out, in, n + 1);
+        return;
+    }
+    size_t cut = LH_TEXT_MAX - 3;
+    while (cut > 0 && ((unsigned char)in[cut] & 0xC0) == 0x80) {
+        cut--;          // inside a UTF-8 character
+    }
+    memcpy(out, in, cut);
+    memcpy(out + cut, "...", 4);
+}
+
+static void check_text(lua_State *L, lh_t *s, size_t old, size_t len)
+{
+    if (s->text_total - old + len > LH_TEXT_TOTAL) {
+        luaL_error(L, "too much text on screen (%d KB per app)", LH_TEXT_TOTAL / 1024);
+    }
 }
 
 // The object behind handle 1, or NULL while shutting down (calls do nothing).
@@ -207,7 +234,7 @@ static int m_remove(lua_State *L)
     lh_obj_t *o = &s->objs[h->slot];
     if (o->obj && o->gen == h->gen) {
         lv_obj_delete(o->obj);
-        free_obj(L, o);
+        free_obj(L, s, o);
     }
     return 0;
 }
@@ -215,9 +242,15 @@ static int m_remove(lua_State *L)
 static int m_text(lua_State *L)
 {
     lh_obj_t *o = check(L);
-    const char *t = luaL_checkstring(L, 2);
+    char t[LH_TEXT_MAX + 1];
+    clip_text(t, luaL_checkstring(L, 2));
     if (o) {
+        lh_t *s = lh_get(L);
+        size_t len = strlen(t);
+        check_text(L, s, o->text_len, len);
         lv_label_set_text(o->obj, t);
+        s->text_total = s->text_total - o->text_len + len;
+        o->text_len = len;
     }
     return 0;
 }
@@ -357,7 +390,8 @@ static const lv_font_t *font_for(lua_State *L, int size, bool mono)
 static int l_label(lua_State *L)
 {
     int x = luaL_checkinteger(L, 1), y = luaL_checkinteger(L, 2);
-    const char *text = luaL_checkstring(L, 3);
+    char text[LH_TEXT_MAX + 1];
+    clip_text(text, luaL_checkstring(L, 3));
     int size = opt_int(L, 4, "size", 14);
     int w = opt_int(L, 4, "w", 0);
     bool mono = false;
@@ -382,6 +416,8 @@ static int l_label(lua_State *L)
     if (!s) {
         return 0;
     }
+    size_t len = strlen(text);
+    check_text(L, s, 0, len);
     lv_obj_t *l = lv_label_create(s->area);
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_set_style_text_color(l, color, 0);
@@ -391,7 +427,9 @@ static int l_label(lua_State *L)
     if (w > 0) {
         lv_obj_set_width(l, w);
     }
-    new_obj(L, s, LH_LABEL, l);
+    lh_obj_t *o = new_obj(L, s, LH_LABEL, l);
+    o->text_len = len;
+    s->text_total += len;
     return 1;
 }
 
@@ -509,7 +547,8 @@ static int l_bg(lua_State *L)
 
 static int l_hint(lua_State *L)
 {
-    const char *text = luaL_optstring(L, 1, "");
+    char text[LH_TEXT_MAX + 1];
+    clip_text(text, luaL_optstring(L, 1, ""));
     lh_t *s = ui_session(L);
     if (!s) {
         return 0;
@@ -548,7 +587,8 @@ static void dialog_ref(lua_State *L, lh_t *s, int fn_idx)
 
 static int l_confirm(lua_State *L)
 {
-    const char *text = luaL_checkstring(L, 1);
+    char text[LH_TEXT_MAX + 1];
+    clip_text(text, luaL_checkstring(L, 1));
     luaL_checktype(L, 2, LUA_TFUNCTION);
     lh_t *s = ui_session(L);
     if (!s) {
@@ -572,7 +612,8 @@ static int l_confirm(lua_State *L)
 
 static int l_input(lua_State *L)
 {
-    const char *title = luaL_checkstring(L, 1);
+    char title[LH_TEXT_MAX + 1];
+    clip_text(title, luaL_checkstring(L, 1));
     int max = luaL_checkinteger(L, 2);
     luaL_checktype(L, 3, LUA_TFUNCTION);
     lh_t *s = ui_session(L);
@@ -681,7 +722,7 @@ void lh_ui_clear(lh_t *s)
         lh_obj_t *o = &s->objs[i];
         if (o->obj) {
             lv_obj_delete(o->obj);
-            free_obj(s->L, o);
+            free_obj(s->L, s, o);
         }
     }
     if (s->hint) {
@@ -693,8 +734,9 @@ void lh_ui_clear(lh_t *s)
 void lh_ui_release(lh_t *s)
 {
     for (int i = 0; i < LH_OBJ_MAX; i++) {
-        free_obj(NULL, &s->objs[i]);
+        free_obj(NULL, s, &s->objs[i]);
     }
+    s->text_total = 0;
     s->hint = s->modal = s->area = NULL;
     s->kb = NULL;
     s_ui = NULL;

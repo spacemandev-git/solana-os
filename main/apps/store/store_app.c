@@ -69,10 +69,33 @@ static ver_t *s_inbox;
 static int s_inbox_n = -1;
 static char s_job_rm[4][LUA_PKG_ID_MAX + 1];
 
-// Requests: each kind remembers the token of its newest call; older answers are ignored.
-static uint32_t s_tok, s_tok_list, s_tok_lib, s_tok_detail, s_tok_buy;
-static uint32_t s_tok_dl;               // survives closing the store
+// Requests. The os_api ctx of each is an address in our own array, so it
+// can't clash with another app's; each kind keeps only its newest request
+// (the one before is cancelled), so its slots can roll over. The download
+// survives closing the store.
+enum { REQ_LIST, REQ_LIB, REQ_DETAIL, REQ_BUY, REQ_DL, REQ_KINDS };
+static uint8_t s_ctx_space[REQ_KINDS][8];
+static uint8_t s_req_seq[REQ_KINDS];
+static void *s_req[REQ_KINDS];          // live request per kind, NULL = none
+static bool s_reask;                    // the price changed: ask again once details reload
 static char s_dl_id[LUA_PKG_ID_MAX + 1], s_dl_name[21];
+
+static void *req_new(int kind)
+{
+    if (s_req[kind]) {
+        os_api_cancel(s_req[kind]);
+    }
+    s_req[kind] = &s_ctx_space[kind][s_req_seq[kind]++ & 7];
+    return s_req[kind];
+}
+
+static void req_cancel(int kind)
+{
+    if (s_req[kind]) {
+        os_api_cancel(s_req[kind]);
+        s_req[kind] = NULL;
+    }
+}
 
 static lv_obj_t *s_root, *s_cat_l, *s_sort_l, *s_hint, *s_offline, *s_detail_box, *s_action;
 static ui_list_t *s_list;
@@ -293,10 +316,10 @@ static void fetch_page(bool more)
     }
     snprintf(path, sizeof(path), "/api/device/apps?sort=%s&limit=%d%s%s%s%s", s_sorts[s_sort], PAGE_APPS,
              s_cats[s_cat] ? "&category=" : "", s_cats[s_cat] ? s_cats[s_cat] : "", q, cursor);
-    s_tok_list = ++s_tok;
     s_err = NULL;
-    s_loading = os_api_call("GET", path, NULL, 0, list_cb, (void *)(uintptr_t)s_tok_list) == ESP_OK;
+    s_loading = os_api_call("GET", path, NULL, 0, list_cb, req_new(REQ_LIST)) == ESP_OK;
     if (!s_loading) {
+        s_req[REQ_LIST] = NULL;
         s_err = "Can't reach the server";
     }
     render_list();
@@ -304,9 +327,10 @@ static void fetch_page(bool more)
 
 static void list_cb(int status, const char *body, void *ctx)
 {
-    if ((uintptr_t)ctx != s_tok_list || !s_open) {
+    if (ctx != s_req[REQ_LIST] || !s_open) {
         return;
     }
+    s_req[REQ_LIST] = NULL;
     s_loading = false;
     cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
     const cJSON *items = cJSON_GetObjectItemCaseSensitive(j, "items");
@@ -346,9 +370,10 @@ static void list_cb(int status, const char *body, void *ctx)
 
 static void library_cb(int status, const char *body, void *ctx)
 {
-    if ((uintptr_t)ctx != s_tok_lib || !s_open) {
+    if (ctx != s_req[REQ_LIB] || !s_open) {
         return;
     }
+    s_req[REQ_LIB] = NULL;
     // Quest grants run longer while their quest is active: keep app.json's expiry current.
     bool moved = status == 200 && lua_pkg_apply_library(body) > 0;
     cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
@@ -388,8 +413,9 @@ static void load_all(void)
 {
     s_loaded = true;            // until an answer says otherwise
     fetch_page(false);
-    s_tok_lib = ++s_tok;
-    os_api_call("GET", "/api/device/library", NULL, 0, library_cb, (void *)(uintptr_t)s_tok_lib);
+    if (os_api_call("GET", "/api/device/library", NULL, 0, library_cb, req_new(REQ_LIB)) != ESP_OK) {
+        s_req[REQ_LIB] = NULL;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -403,9 +429,9 @@ static void render_action(void)
     const entry_t *e = &s_detail->e;
     char t[64], price[24];
     const char *have = installed_version(e->id);
-    if (s_tok_dl && !strcmp(s_dl_id, e->id)) {
+    if (s_req[REQ_DL] && !strcmp(s_dl_id, e->id)) {
         strlcpy(t, "Installing...", sizeof(t));
-    } else if (s_tok_buy) {
+    } else if (s_req[REQ_BUY]) {
         strlcpy(t, "Buying...", sizeof(t));
     } else if (have && strcmp(have, e->version)) {
         snprintf(t, sizeof(t), "SELECT update to v%s", e->version);
@@ -428,7 +454,9 @@ static void close_detail(void)
     s_detail_box = s_action = NULL;
     free(s_detail);
     s_detail = NULL;
-    s_tok_detail = 0;
+    req_cancel(REQ_DETAIL);
+    req_cancel(REQ_BUY);
+    s_reask = false;
     render_list();
 }
 
@@ -494,9 +522,11 @@ static void show_detail(void)
     render_action();
 }
 
+static void detail_select(void);
+
 static void detail_cb(int status, const char *body, void *ctx)
 {
-    if ((uintptr_t)ctx != s_tok_detail || !s_detail || !s_open) {
+    if (ctx != s_req[REQ_DETAIL] || !s_detail || !s_open) {
         return;
     }
     cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
@@ -534,6 +564,21 @@ static void detail_cb(int status, const char *body, void *ctx)
     }
     cJSON_Delete(j);
     show_detail();
+    if (s_reask) {
+        s_reask = false;
+        detail_select();        // ask again with the new price
+    }
+}
+
+static void fetch_detail(void)
+{
+    char path[80];
+    snprintf(path, sizeof(path), "/api/device/apps/%s", s_detail->e.id);
+    if (os_api_call("GET", path, NULL, 0, detail_cb, req_new(REQ_DETAIL)) != ESP_OK) {
+        s_req[REQ_DETAIL] = NULL;
+        os_toast("Can't reach the server");
+        close_detail();
+    }
 }
 
 static void open_detail(const char *id)
@@ -556,23 +601,17 @@ static void open_detail(const char *id)
     if (s_offline) {
         lv_obj_move_foreground(s_offline);
     }
-    char path[80];
-    snprintf(path, sizeof(path), "/api/device/apps/%s", id);
-    s_tok_detail = ++s_tok;
-    if (os_api_call("GET", path, NULL, 0, detail_cb, (void *)(uintptr_t)s_tok_detail) != ESP_OK) {
-        os_toast("Can't reach the server");
-        close_detail();
-    }
+    fetch_detail();
 }
 
 // Download answer: body is the decoded X-App-Manifest. Runs even after the
 // store closed (the request isn't cancelled), then touches only the card.
 static void download_cb(int status, const char *body, void *ctx)
 {
-    if ((uintptr_t)ctx != s_tok_dl) {
+    if (ctx != s_req[REQ_DL]) {
         return;
     }
-    s_tok_dl = 0;
+    s_req[REQ_DL] = NULL;
     char rel[64];
     lua_pkg_t pkg;
     bool ok = status == 200 && body && lua_pkg_parse(body, s_dl_id, &pkg);
@@ -633,7 +672,7 @@ static void install(const entry_t *e)
         os_toast("Insert a microSD card");
         return;
     }
-    if (s_tok_dl) {
+    if (s_req[REQ_DL]) {
         os_toast("Still installing %s", s_dl_name);
         return;
     }
@@ -643,9 +682,8 @@ static void install(const entry_t *e)
     snprintf(src, sizeof(src), "/api/device/apps/%s/source", e->id);
     strlcpy(s_dl_id, e->id, sizeof(s_dl_id));
     strlcpy(s_dl_name, e->name, sizeof(s_dl_name));
-    s_tok_dl = ++s_tok;
-    if (os_api_download(src, path, LUA_PKG_SRC_MAX, download_cb, (void *)(uintptr_t)s_tok_dl) != ESP_OK) {
-        s_tok_dl = 0;
+    if (os_api_download(src, path, LUA_PKG_SRC_MAX, download_cb, req_new(REQ_DL)) != ESP_OK) {
+        s_req[REQ_DL] = NULL;
         os_toast("Can't reach the server");
     }
     render_action();
@@ -653,11 +691,11 @@ static void install(const entry_t *e)
 
 static void buy_cb(int status, const char *body, void *ctx)
 {
-    if ((uintptr_t)ctx != s_tok_buy || !s_open) {
+    if (ctx != s_req[REQ_BUY] || !s_open) {
         return;
     }
-    s_tok_buy = 0;
-    cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
+    s_req[REQ_BUY] = NULL;
+    cJSON *j = status == 200 || status == 409 ? cJSON_Parse(body) : NULL;
     const cJSON *bal = cJSON_GetObjectItemCaseSensitive(j, "balance");
     bool owned = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "owned"));
     if (cJSON_IsNumber(bal)) {
@@ -667,6 +705,15 @@ static void buy_cb(int status, const char *body, void *ctx)
             os_cloud_note_lamps(bal->valueint, in->level);
             free(in);
         }
+    }
+    const cJSON *price = cJSON_GetObjectItemCaseSensitive(j, "price");
+    if (status == 409 && cJSON_IsNumber(price) && s_detail) {
+        // The price changed since the details loaded: show the new one and ask again.
+        cJSON_Delete(j);
+        os_toast("The price changed");
+        s_reask = true;
+        fetch_detail();
+        return;
     }
     cJSON_Delete(j);
     if (!owned) {
@@ -693,14 +740,15 @@ static void buy_cb(int status, const char *body, void *ctx)
 
 static void buy_confirmed(bool yes, void *ctx)
 {
-    if (!yes || !s_open || !s_detail || (uintptr_t)ctx != s_tok_detail) {
+    if (!yes || !s_open || !s_detail || ctx != s_req[REQ_DETAIL]) {
         return;
     }
-    char path[80];
+    // The price the buyer saw: the server refuses with 409 if it changed.
+    char path[80], body[32];
     snprintf(path, sizeof(path), "/api/device/apps/%s/buy", s_detail->e.id);
-    s_tok_buy = ++s_tok;
-    if (os_api_call("POST", path, "{}", 0, buy_cb, (void *)(uintptr_t)s_tok_buy) != ESP_OK) {
-        s_tok_buy = 0;
+    snprintf(body, sizeof(body), "{\"price\":%d}", s_detail->e.price);
+    if (os_api_call("POST", path, body, 0, buy_cb, req_new(REQ_BUY)) != ESP_OK) {
+        s_req[REQ_BUY] = NULL;
         os_toast("Can't reach the server");
     }
     render_action();
@@ -709,16 +757,17 @@ static void buy_confirmed(bool yes, void *ctx)
 static void detail_select(void)
 {
     const entry_t *e = &s_detail->e;
-    if (!e->version[0] || s_tok_buy || (s_tok_dl && !strcmp(s_dl_id, e->id))) {
+    if (!e->version[0] || s_req[REQ_BUY] || (s_req[REQ_DL] && !strcmp(s_dl_id, e->id))) {
         return;                 // still loading, or busy
     }
     const char *have = installed_version(e->id);
     if (have && !strcmp(have, e->version)) {
         lua_host_launch(e->id);
     } else if (!have && e->price > 0 && !e->owned) {
-        char q[96], price[24];
-        snprintf(q, sizeof(q), "Buy %s for %s?", e->name, ui_fmt_lamps(price, sizeof(price), e->price));
-        os_confirm(q, buy_confirmed, (void *)(uintptr_t)s_tok_detail);
+        char q[96], price[24], name[21];
+        lua_pkg_plain(name, sizeof(name), e->name);
+        snprintf(q, sizeof(q), "Buy %s\nfor %s?", name, ui_fmt_lamps(price, sizeof(price), e->price));
+        os_confirm(q, buy_confirmed, s_req[REQ_DETAIL]);
     } else {
         install(e);
     }
@@ -772,13 +821,11 @@ static void leave(void)
     s_inbox = NULL;
     xSemaphoreGive(s_mx);
     // The download, if any, goes on: its answer writes app.json.
-    uint32_t toks[] = {s_tok_list, s_tok_lib, s_tok_detail, s_tok_buy};
-    for (size_t i = 0; i < sizeof(toks) / sizeof(toks[0]); i++) {
-        if (toks[i]) {
-            os_api_cancel((void *)(uintptr_t)toks[i]);
-        }
-    }
-    s_tok_list = s_tok_lib = s_tok_detail = s_tok_buy = 0;
+    req_cancel(REQ_LIST);
+    req_cancel(REQ_LIB);
+    req_cancel(REQ_DETAIL);
+    req_cancel(REQ_BUY);
+    s_reask = false;
     s_kb = NULL;            // deleted with the root
     free(s_detail);
     s_detail = NULL;
