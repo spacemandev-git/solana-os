@@ -62,7 +62,7 @@ typedef struct lh_call {
     int status;                 // HTTP status, 0 = no answer
     char *body;
     const char *err;            // local outcome: "denied", "offline", ...
-    char *method, *path, *req;  // kept while the OS confirm dialog is open
+    char *method, *path, *req;  // kept while os_confirm is open
 } lh_call_t;
 
 typedef struct lh {
@@ -116,8 +116,6 @@ typedef struct lh {
 
     // Server calls
     lh_call_t *calls;
-    lh_call_t *confirm;         // waiting for the OS confirm dialog
-    lv_obj_t *confirm_box;
 } lh_t;
 
 // Figures from the last run, for "lua mem".
@@ -184,7 +182,6 @@ void lh_storage_flush(lh_t *s, bool force);
 // lua_net.c: mesh, lamps, items, profile, quest
 void lh_open_net(lua_State *L);
 void lh_calls_run(lh_t *s);                             // answer finished calls
-bool lh_confirm_key(lh_t *s, os_key_t key);             // OS task: the spend/transfer dialog
 void lh_net_stop(lh_t *s);                              // OS task, after the Lua task ended
 void lh_calls_free(lh_t *s);
 void lh_mesh_event(lh_t *s, char *data);

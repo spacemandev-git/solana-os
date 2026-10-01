@@ -119,11 +119,6 @@ static void show_error(lh_t *s, const char *title, const char *msg)
 {
     lh_ui_close_dialog(s);
     lh_ui_clear(s);
-    if (s->confirm_box) {
-        lv_obj_delete(s->confirm_box);
-        s->confirm_box = NULL;
-        s->confirm = NULL;
-    }
     lv_obj_t *a = s->area;
     lv_obj_set_style_bg_color(a, ui_col(COL_BG), 0);
     lv_obj_t *t = ui_label(a, &sol_font_20, COL_ERR, title);
@@ -586,9 +581,6 @@ static bool host_key(os_key_t key, bool repeat)
     lh_t *s = lh_cur;
     if (!s || s->failed || s->finished) {
         return key != OS_KEY_BACK;      // error screen: CANCEL exits
-    }
-    if (lh_confirm_key(s, key)) {
-        return true;
     }
     lh_ev_t ev = { .kind = LH_EV_KEY, .key = key, .repeat = repeat, .gen = s->gen };
     lh_post(&ev);

@@ -6,10 +6,13 @@
 #include "core/os.h"
 
 extern const os_app_t app_wifi, app_badge, app_espnow, app_skate, app_debug, app_settings, app_about;
+extern const os_app_t app_store, app_apps;
 
 const os_app_t *const os_apps[] = {
     &app_wifi,
     &app_badge,
+    &app_store,
+    &app_apps,
     &app_espnow,
     &app_skate,
     &app_debug,

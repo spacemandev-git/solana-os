@@ -3,8 +3,8 @@
 // Server calls go through os_api with the app id fixed by the host. Each call
 // gets a record with a numeric token (the os_api ctx), so an answer that
 // arrives after the app closed can never touch freed memory: it just finds no
-// record. Spending and transfers first open an OS dialog on the top layer,
-// where the script can neither draw over it nor press its keys.
+// record. Spending and transfers wait for os_confirm, which the OS draws on
+// the top layer and answers from its own keys: a script can't press it.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,87 +89,42 @@ static void send(lh_call_t *c, const char *method, const char *path, const char 
     }
 }
 
-static void fmt_lamps(char *out, size_t n, int amount)
+// os_confirm answer (OS task, or right away if another dialog is open).
+static void confirm_done(bool yes, void *ctx)
 {
-    char digits[16], grouped[24];
-    int len = snprintf(digits, sizeof(digits), "%d", amount), o = 0;
-    for (int i = 0; i < len; i++) {
-        if (i && (len - i) % 3 == 0) {
-            grouped[o++] = ',';
+    uint32_t token = (uint32_t)(uintptr_t)ctx;
+    char *method = NULL, *path = NULL, *req = NULL;
+    lh_call_t *c = NULL;
+    xSemaphoreTake(lh_mx, portMAX_DELAY);
+    for (c = lh_cur ? lh_cur->calls : NULL; c && (c->token != token || c->done); c = c->next) {
+    }
+    if (c) {
+        method = c->method;
+        path = c->path;
+        req = c->req;
+        c->method = c->path = c->req = NULL;
+        if (!yes) {
+            c->err = "denied";
+            c->done = true;
+            wake(lh_cur);
         }
-        grouped[o++] = digits[i];
     }
-    grouped[o] = 0;
-    snprintf(out, n, "%s !LAMPs", grouped);
-}
-
-// The OS confirm dialog for spend/transfer: on the top layer, keys come from
-// the host's on_key on the OS task (lh_confirm_key), never from the script.
-static void confirm_open(lh_t *s, const char *question, int amount, const char *note)
-{
-    lv_obj_t *dim = lv_obj_create(lv_layer_top());
-    lv_obj_remove_style_all(dim);
-    lv_obj_set_size(dim, OS_ROOT_W, OS_ROOT_H);
-    lv_obj_set_pos(dim, 0, OS_STATUS_H);
-    lv_obj_set_style_bg_opa(dim, LV_OPA_80, 0);
-    lv_obj_set_style_bg_color(dim, ui_col(COL_BG), 0);
-    lv_obj_set_scrollable(dim, false);
-    lv_obj_t *p = ui_panel(dim, 16, 0, OS_ROOT_W - 32, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_all(p, 12, 0);
-    lv_obj_set_style_border_color(p, ui_col(COL_GREEN), 0);
-    lv_obj_set_flex_flow(p, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(p, 6, 0);
-    lv_obj_t *t = ui_label(p, &sol_mono_12, COL_DIM, "Solana OS");
-    t = ui_label(p, &sol_font_14, COL_TEXT, question);
-    lv_obj_set_width(t, lv_pct(100));
-    char lamps[32];
-    fmt_lamps(lamps, sizeof(lamps), amount);
-    ui_label(p, &sol_font_20, COL_LAMPS, lamps);
-    if (note && note[0]) {
-        t = ui_label(p, &sol_mono_12, COL_DIM, note);
-        lv_obj_set_width(t, lv_pct(100));
+    xSemaphoreGive(lh_mx);
+    if (c && yes) {
+        send(c, method, path, req);     // the record stays until the Lua task answers it
+        if (c->done) {
+            wake(lh_cur);
+        }
     }
-    ui_label(p, &sol_mono_12, COL_DIM, "SELECT pay   CANCEL no");
-    lv_obj_center(p);
-    s->confirm_box = dim;
-}
-
-static void confirm_close(lh_t *s)
-{
-    if (s->confirm_box) {
-        lv_obj_delete(s->confirm_box);
-        s->confirm_box = NULL;
-    }
-    s->confirm = NULL;
-}
-
-bool lh_confirm_key(lh_t *s, os_key_t key)
-{
-    lh_call_t *c = s->confirm;
-    if (!c) {
-        return false;
-    }
-    if (key == OS_KEY_SELECT) {
-        confirm_close(s);
-        send(c, c->method, c->path, c->req);
-    } else if (key == OS_KEY_BACK) {
-        confirm_close(s);
-        finish(c, "denied");
-    } else {
-        return true;
-    }
-    free(c->method);
-    free(c->path);
-    free(c->req);
-    c->method = c->path = c->req = NULL;
-    wake(s);
-    return true;
+    free(method);
+    free(path);
+    free(req);
 }
 
 // Starts a call. cb_idx: the callback. body_idx: table to send as JSON, or 0.
 // confirm: the dialog question for spend/transfer, or NULL.
 static int start(lua_State *L, op_t op, const char *method, const char *path, int body_idx, int cb_idx,
-                 const char *confirm, int amount, const char *note)
+                 const char *confirm)
 {
     lh_t *s = lh_get(L);
     luaL_checktype(L, cb_idx, LUA_TFUNCTION);
@@ -204,7 +159,7 @@ static int start(lua_State *L, op_t op, const char *method, const char *path, in
 
     const char *err = !(s->pkg.perms & s_ops[op].perm) ? "denied"
                     : !body_ok ? (strcmp(b.err, "too big") ? b.err : "request too big")
-                    : n >= LH_CALLS_MAX || (confirm && s->confirm) ? "busy"
+                    : n >= LH_CALLS_MAX || (confirm && os_confirm_open()) ? "busy"
                     : !os_api_online() ? "offline" : NULL;
     if (err) {
         finish(c, err);
@@ -216,8 +171,7 @@ static int start(lua_State *L, op_t op, const char *method, const char *path, in
         if (!c->method || !c->path || !c->req) {
             finish(c, "busy");
         } else {
-            s->confirm = c;
-            confirm_open(s, confirm, amount, note);
+            os_confirm(confirm, confirm_done, (void *)(uintptr_t)c->token);
         }
     } else {
         send(c, method, path, b.p);
@@ -316,11 +270,6 @@ void lh_calls_run(lh_t *s)
 
 void lh_net_stop(lh_t *s)
 {
-    if (s->confirm_box) {
-        lv_obj_delete(s->confirm_box);
-        s->confirm_box = NULL;
-    }
-    s->confirm = NULL;
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     for (lh_call_t *c = s->calls; c; c = c->next) {
         if (!c->done) {
@@ -373,7 +322,7 @@ static int l_balance(lua_State *L)
 {
     char path[80];
     app_path(L, path, sizeof(path), "lamps");
-    return start(L, OP_BALANCE, "GET", path, 0, 1, NULL, 0, NULL);
+    return start(L, OP_BALANCE, "GET", path, 0, 1, NULL);
 }
 
 static int l_spend(lua_State *L)
@@ -387,10 +336,11 @@ static int l_spend(lua_State *L)
     lua_setfield(L, -2, "amount");
     lua_pushvalue(L, 2);
     lua_setfield(L, -2, "sku");
-    char path[80], q[96];
+    char path[80], lamps[24], q[128];
     app_path(L, path, sizeof(path), "lamps/spend");
-    snprintf(q, sizeof(q), "Pay %s for %s?", lh_get(L)->pkg.name, sku);
-    return start(L, OP_SPEND, "POST", path, 4, 3, q, amount, NULL);
+    snprintf(q, sizeof(q), "Pay %s to %s for %s?", ui_fmt_lamps(lamps, sizeof(lamps), amount),
+             lh_get(L)->pkg.name, sku);
+    return start(L, OP_SPEND, "POST", path, 4, 3, q);
 }
 
 static int l_transfer(lua_State *L)
@@ -407,10 +357,11 @@ static int l_transfer(lua_State *L)
     lua_setfield(L, -2, "amount");
     lua_pushstring(L, memo);
     lua_setfield(L, -2, "memo");
-    char path[80], q[96];
+    char path[80], lamps[24], q[160];
     app_path(L, path, sizeof(path), "lamps/transfer");
-    snprintf(q, sizeof(q), "%s wants to send badge %s:", lh_get(L)->pkg.name, to);
-    return start(L, OP_TRANSFER, "POST", path, 5, 4, q, amount, memo);
+    snprintf(q, sizeof(q), "%s: send %s to badge %s?%s%s%s", lh_get(L)->pkg.name,
+             ui_fmt_lamps(lamps, sizeof(lamps), amount), to, memo[0] ? "\n\"" : "", memo, memo[0] ? "\"" : "");
+    return start(L, OP_TRANSFER, "POST", path, 5, 4, q);
 }
 
 static int l_award(lua_State *L)
@@ -425,14 +376,14 @@ static int l_award(lua_State *L)
     lua_setfield(L, -2, "reason");
     char path[80];
     app_path(L, path, sizeof(path), "lamps/award");
-    return start(L, OP_AWARD, "POST", path, 4, 3, NULL, 0, NULL);
+    return start(L, OP_AWARD, "POST", path, 4, 3, NULL);
 }
 
 static int items_get(lua_State *L, bool all)
 {
     char path[80];
     app_path(L, path, sizeof(path), all ? "items?all=1" : "items?all=0");
-    return start(L, OP_ITEMS, "GET", path, 0, 1, NULL, 0, NULL);
+    return start(L, OP_ITEMS, "GET", path, 0, 1, NULL);
 }
 
 static int l_items_list(lua_State *L)
@@ -460,7 +411,7 @@ static int l_grant(lua_State *L)
     lua_setfield(L, -2, "data");
     char path[80];
     app_path(L, path, sizeof(path), "items");
-    return start(L, OP_GRANT, "POST", path, 5, 4, NULL, 0, NULL);
+    return start(L, OP_GRANT, "POST", path, 5, 4, NULL);
 }
 
 static int l_update(lua_State *L)
@@ -474,7 +425,7 @@ static int l_update(lua_State *L)
     char tail[48], path[96];
     snprintf(tail, sizeof(tail), "items/%s", id);
     app_path(L, path, sizeof(path), tail);
-    return start(L, OP_UPDATE, "PATCH", path, 4, 3, NULL, 0, NULL);
+    return start(L, OP_UPDATE, "PATCH", path, 4, 3, NULL);
 }
 
 static int l_items_remove(lua_State *L)
@@ -483,14 +434,14 @@ static int l_items_remove(lua_State *L)
     char tail[48], path[96];
     snprintf(tail, sizeof(tail), "items/%s", id);
     app_path(L, path, sizeof(path), tail);
-    return start(L, OP_REMOVE, "DELETE", path, 0, 2, NULL, 0, NULL);
+    return start(L, OP_REMOVE, "DELETE", path, 0, 2, NULL);
 }
 
 static int l_me(lua_State *L)
 {
     char path[80];
     app_path(L, path, sizeof(path), "profile");
-    return start(L, OP_ME, "GET", path, 0, 1, NULL, 0, NULL);
+    return start(L, OP_ME, "GET", path, 0, 1, NULL);
 }
 
 static int l_profile_get(lua_State *L)
@@ -499,7 +450,7 @@ static int l_profile_get(lua_State *L)
     char tail[48], path[96];
     snprintf(tail, sizeof(tail), "profile/%s", id);
     app_path(L, path, sizeof(path), tail);
-    return start(L, OP_PROFILE, "GET", path, 0, 2, NULL, 0, NULL);
+    return start(L, OP_PROFILE, "GET", path, 0, 2, NULL);
 }
 
 static int l_report(lua_State *L)
@@ -520,14 +471,14 @@ static int l_report(lua_State *L)
     }
     char path[80];
     app_path(L, path, sizeof(path), "quest");
-    return start(L, OP_REPORT, "POST", path, 4, 3, NULL, 0, NULL);
+    return start(L, OP_REPORT, "POST", path, 4, 3, NULL);
 }
 
 static int l_active(lua_State *L)
 {
     char path[80];
     app_path(L, path, sizeof(path), "quest");
-    return start(L, OP_ACTIVE, "GET", path, 0, 1, NULL, 0, NULL);
+    return start(L, OP_ACTIVE, "GET", path, 0, 1, NULL);
 }
 
 // ---------------------------------------------------------------------------
