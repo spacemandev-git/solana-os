@@ -40,6 +40,8 @@ static const char *TAG = "lua";
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
 #define LH_READ_CHUNK       256
+#define LH_GC_PAUSE         120         // collect when the heap grows 20 % over the live data
+#define LH_GC_STEPMUL       200
 
 SemaphoreHandle_t lh_mx;
 lh_t *lh_cur;
@@ -103,7 +105,10 @@ static void step_hook(lua_State *L, lua_Debug *ar)
         // From now on fail at every instruction, so pcall() can't keep it going.
         s->killed = true;
         lua_sethook(L, step_hook, LUA_MASKCOUNT, 1);
-        luaL_error(L, "Script took too long");
+        luaL_where(L, 0);       // level 0: the script line running now
+        lua_pushliteral(L, "Script took too long");
+        lua_concat(L, 2);
+        lua_error(L);
     }
 }
 
@@ -152,7 +157,6 @@ static void close_state(lh_t *s)
     s->steps = 0;
     lua_close(s->L);
     s->L = NULL;
-    lh_stats.mem_end = s->mem;      // what lua_close left behind: should be 0
 }
 
 // The script failed with rc and its error on the stack. LVGL lock held.
@@ -173,7 +177,7 @@ static void fail(lh_t *s, int rc)
     }
     lua_settop(L, 0);
     printf("[lua:%s] %s: %s\n", s->pkg.id, title, msg);
-    strlcpy(lh_stats.err, msg, sizeof(lh_stats.err));
+    strlcpy(s->err, msg, sizeof(s->err));
     s->failed = true;
     lh_mesh_mute();
     show_error(s, title, msg);
@@ -290,6 +294,11 @@ static int boot(lua_State *L)
         lua_error(L);
     }
     lua_setfield(L, LUA_REGISTRYINDEX, "solana.main");
+    // Drop the compiler's garbage now, and collect early from here on: the
+    // cap is a ceiling, and every KB the script holds is gone from the
+    // badge's heap (TLS needs ~30 KB of it for each server call).
+    lua_gc(L, LUA_GCCOLLECT);
+    lua_gc(L, LUA_GCINC, LH_GC_PAUSE, LH_GC_STEPMUL, 0);
     return 0;
 }
 
@@ -402,9 +411,12 @@ static TickType_t wait_ticks(lh_t *s)
 
 static void task_end(lh_t *s)
 {
-    lh_stats.mem_peak = s->mem_peak;
-    lh_stats.steps_peak = s->steps_peak;
-    lh_stats.stack_free = uxTaskGetStackHighWaterMark(NULL);
+    lh_stats = (lh_stats_t){
+        .mem_peak = s->mem_peak, .mem_end = s->mem, .steps_peak = s->steps_peak,
+        .stack_free = uxTaskGetStackHighWaterMark(NULL), .heap_before = s->heap_before,
+    };
+    strlcpy(lh_stats.id, s->pkg.id, sizeof(lh_stats.id));
+    strlcpy(lh_stats.err, s->err, sizeof(lh_stats.err));
     free(s->store_pending);
     s->store_pending = NULL;
     xSemaphoreTake(lh_mx, portMAX_DELAY);
@@ -523,9 +535,7 @@ static void host_enter(lv_obj_t *root)
     s->t0 = lh_now();
     s->area = area;
     s->modal_ref = s->store_ref = LUA_NOREF;
-    memset(&lh_stats, 0, sizeof(lh_stats));
-    strlcpy(lh_stats.id, pkg.id, sizeof(lh_stats.id));
-    lh_stats.heap_before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    s->heap_before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     xSemaphoreTake(s_done, 0);
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     lh_cur = s;

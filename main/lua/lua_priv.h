@@ -75,6 +75,8 @@ typedef struct lh {
     bool mem_hit;               // the allocator refused to go over the cap
     uint32_t steps, steps_peak;
     bool killed;                // over the instruction budget
+    size_t heap_before;         // system heap free at launch
+    char err[96];               // why the script stopped, "" if it didn't
     int64_t t0;                 // ms at launch
 
     // Task and lifecycle
