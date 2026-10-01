@@ -1,9 +1,8 @@
 // mesh, lamps, items, profile and quest for Lua apps (docs/LUA_API.md).
 //
 // Server calls go through os_api with the app id fixed by the host. A sent
-// call's os_api ctx is one of LH_CALLS_SENT addresses in our own array
-// (unique next to other apps' ctxs); its answer finds the record by that
-// slot, so an answer for a closed app finds nothing and touches no freed
+// call's os_api ctx is an os_api_token(); its answer finds the record by
+// that, so an answer for a closed app finds nothing and touches no freed
 // memory. Spending and transfers wait for os_confirm, which the OS draws on
 // the top layer and answers from its own keys: a script can't press it.
 
@@ -37,7 +36,6 @@ static const struct {
 };
 
 static uint32_t s_token;
-static uint8_t s_slots[LH_CALLS_SENT];  // os_api ctxs of sent calls
 
 // ---------------------------------------------------------------------------
 // Call records
@@ -60,11 +58,10 @@ static void free_call(lh_call_t *c)
 // os_api answer, on the OS task.
 static void api_cb(int status, const char *body, void *ctx)
 {
-    int slot = (int)((uint8_t *)ctx - s_slots);
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     lh_t *s = lh_cur;
     for (lh_call_t *c = s ? s->calls : NULL; c; c = c->next) {
-        if (c->state == LH_CALL_SENT && c->slot == slot && !c->done) {
+        if (c->state == LH_CALL_SENT && c->ctx == ctx && !c->done) {
             c->status = status;
             c->body = body ? strdup(body) : NULL;
             c->done = true;
@@ -85,7 +82,7 @@ static void finish(lh_call_t *c, const char *err)
 
 static void send(lh_call_t *c)
 {
-    esp_err_t e = os_api_call(c->method, c->path, c->req, 0, api_cb, &s_slots[c->slot]);
+    esp_err_t e = os_api_call(c->method, c->path, c->req, 0, api_cb, c->ctx);
     free(c->method);
     free(c->path);
     free(c->req);
@@ -100,25 +97,21 @@ static void pump(lh_t *s)
 {
     for (;;) {
         lh_call_t *next = NULL;
-        uint32_t used = 0;          // slots of calls in os_api
+        int sent = 0;
         xSemaphoreTake(lh_mx, portMAX_DELAY);
         for (lh_call_t *c = s->calls; c; c = c->next) {
             if (c->done) {
                 continue;
             }
             if (c->state == LH_CALL_SENT) {
-                used |= 1u << c->slot;
+                sent++;
             } else if (c->state == LH_CALL_QUEUED && !next) {
                 next = c;
             }
         }
-        int slot = 0;
-        while (slot < LH_CALLS_SENT && (used & (1u << slot))) {
-            slot++;
-        }
-        if (next && slot < LH_CALLS_SENT) {
+        if (next && sent < LH_CALLS_SENT) {
             next->state = LH_CALL_SENT;
-            next->slot = slot;
+            next->ctx = os_api_token();
         } else {
             next = NULL;
         }
@@ -304,7 +297,7 @@ void lh_net_stop(lh_t *s)
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     for (lh_call_t *c = s->calls; c; c = c->next) {
         if (!c->done && c->state == LH_CALL_SENT) {
-            os_api_cancel(&s_slots[c->slot]);
+            os_api_cancel(c->ctx);
         }
     }
     xSemaphoreGive(lh_mx);

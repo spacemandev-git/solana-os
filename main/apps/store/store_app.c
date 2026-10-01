@@ -69,23 +69,17 @@ static ver_t *s_inbox;
 static int s_inbox_n = -1;
 static char s_job_rm[4][LUA_PKG_ID_MAX + 1];
 
-// Requests. The os_api ctx of each is an address in our own array, so it
-// can't clash with another app's; each kind keeps only its newest request
-// (the one before is cancelled), so its slots can roll over. The download
-// survives closing the store.
+// Requests, by os_api_token(): each kind keeps only its newest request (the
+// one before is cancelled). The download survives closing the store.
 enum { REQ_LIST, REQ_LIB, REQ_DETAIL, REQ_BUY, REQ_DL, REQ_KINDS };
-static uint8_t s_ctx_space[REQ_KINDS][8];
-static uint8_t s_req_seq[REQ_KINDS];
 static void *s_req[REQ_KINDS];          // live request per kind, NULL = none
 static bool s_reask;                    // the price changed: ask again once details reload
 static char s_dl_id[LUA_PKG_ID_MAX + 1], s_dl_name[21];
 
 static void *req_new(int kind)
 {
-    if (s_req[kind]) {
-        os_api_cancel(s_req[kind]);
-    }
-    s_req[kind] = &s_ctx_space[kind][s_req_seq[kind]++ & 7];
+    os_api_cancel(s_req[kind]);         // NULL: nothing to cancel
+    s_req[kind] = os_api_token();
     return s_req[kind];
 }
 

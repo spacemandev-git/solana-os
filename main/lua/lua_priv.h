@@ -56,11 +56,11 @@ typedef struct {
 } lh_timer_t;
 
 // One server request (lua_net.c). The Lua task owns the list; the OS-task
-// answer callback finds a record by its slot and fills it in under lh_mx.
+// answer callback finds a record by its os_api ctx and fills it in under lh_mx.
 typedef struct lh_call {
     struct lh_call *next;
     uint32_t token;             // os_confirm ctx: a number, never a pointer
-    int8_t slot;                // os_api ctx while sent: &lh_net's slot array
+    void *ctx;                  // os_api ctx while sent (os_api_token)
     int cb_ref;
     uint8_t op;
     uint8_t state;              // LH_CALL_*
