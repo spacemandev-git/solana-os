@@ -81,44 +81,66 @@ static void finish(lh_call_t *c, const char *err)
     xSemaphoreGive(lh_mx);
 }
 
-static void send(lh_call_t *c, const char *method, const char *path, const char *body)
+static void send(lh_call_t *c)
 {
-    esp_err_t e = os_api_call(method, path, body, 0, api_cb, (void *)(uintptr_t)c->token);
+    esp_err_t e = os_api_call(c->method, c->path, c->req, 0, api_cb, (void *)(uintptr_t)c->token);
+    free(c->method);
+    free(c->path);
+    free(c->req);
+    c->method = c->path = c->req = NULL;
     if (e != ESP_OK) {
         finish(c, e == ESP_ERR_INVALID_STATE ? "offline" : "busy");
     }
 }
 
-// os_confirm answer (OS task, or right away if another dialog is open).
+// Lua task: hand queued calls to os_api, LH_CALLS_SENT at a time.
+static void pump(lh_t *s)
+{
+    for (;;) {
+        lh_call_t *next = NULL;
+        int sent = 0;
+        xSemaphoreTake(lh_mx, portMAX_DELAY);
+        for (lh_call_t *c = s->calls; c; c = c->next) {
+            if (c->done) {
+                continue;
+            }
+            if (c->state == LH_CALL_SENT) {
+                sent++;
+            } else if (c->state == LH_CALL_QUEUED && !next) {
+                next = c;
+            }
+        }
+        if (next && sent < LH_CALLS_SENT) {
+            next->state = LH_CALL_SENT;
+        } else {
+            next = NULL;
+        }
+        xSemaphoreGive(lh_mx);
+        if (!next) {
+            return;
+        }
+        send(next);
+    }
+}
+
+// os_confirm answer (OS task): queue the call for the Lua task, or deny it.
 static void confirm_done(bool yes, void *ctx)
 {
     uint32_t token = (uint32_t)(uintptr_t)ctx;
-    char *method = NULL, *path = NULL, *req = NULL;
-    lh_call_t *c = NULL;
     xSemaphoreTake(lh_mx, portMAX_DELAY);
-    for (c = lh_cur ? lh_cur->calls : NULL; c && (c->token != token || c->done); c = c->next) {
-    }
-    if (c) {
-        method = c->method;
-        path = c->path;
-        req = c->req;
-        c->method = c->path = c->req = NULL;
-        if (!yes) {
-            c->err = "denied";
-            c->done = true;
+    for (lh_call_t *c = lh_cur ? lh_cur->calls : NULL; c; c = c->next) {
+        if (c->token == token && !c->done && c->state == LH_CALL_CONFIRM) {
+            if (yes) {
+                c->state = LH_CALL_QUEUED;
+            } else {
+                c->err = "denied";
+                c->done = true;
+            }
             wake(lh_cur);
+            break;
         }
     }
     xSemaphoreGive(lh_mx);
-    if (c && yes) {
-        send(c, method, path, req);     // the record stays until the Lua task answers it
-        if (c->done) {
-            wake(lh_cur);
-        }
-    }
-    free(method);
-    free(path);
-    free(req);
 }
 
 // Starts a call. cb_idx: the callback. body_idx: table to send as JSON, or 0.
@@ -161,20 +183,20 @@ static int start(lua_State *L, op_t op, const char *method, const char *path, in
                     : !body_ok ? (strcmp(b.err, "too big") ? b.err : "request too big")
                     : n >= LH_CALLS_MAX || (confirm && os_confirm_open()) ? "busy"
                     : !os_api_online() ? "offline" : NULL;
-    if (err) {
-        finish(c, err);
-    } else if (confirm) {
+    if (!err) {
         c->method = strdup(method);
         c->path = strdup(path);
         c->req = b.p;
         b.p = NULL;
-        if (!c->method || !c->path || !c->req) {
-            finish(c, "busy");
-        } else {
-            os_confirm(confirm, confirm_done, (void *)(uintptr_t)c->token);
-        }
+        err = !c->method || !c->path || (body_idx && !c->req) ? "busy" : NULL;
+    }
+    if (err) {
+        finish(c, err);
+    } else if (confirm) {
+        c->state = LH_CALL_CONFIRM;
+        os_confirm(confirm, confirm_done, (void *)(uintptr_t)c->token);
     } else {
-        send(c, method, path, b.p);
+        pump(s);
     }
     free(b.p);
     return 0;
@@ -235,6 +257,7 @@ static int deliver(lua_State *L)
 
 void lh_calls_run(lh_t *s)
 {
+    pump(s);
     while (s->L && !s->failed) {
         xSemaphoreTake(lh_mx, portMAX_DELAY);
         lh_call_t **pp = &s->calls, *c = NULL;
@@ -265,6 +288,7 @@ void lh_calls_run(lh_t *s)
             luaL_unref(s->L, LUA_REGISTRYINDEX, c->cb_ref);
         }
         free_call(c);
+        pump(s);
     }
 }
 
@@ -272,7 +296,7 @@ void lh_net_stop(lh_t *s)
 {
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     for (lh_call_t *c = s->calls; c; c = c->next) {
-        if (!c->done) {
+        if (!c->done && c->state == LH_CALL_SENT) {
             os_api_cancel((void *)(uintptr_t)c->token);
         }
     }

@@ -29,7 +29,8 @@
 #define LH_STORAGE_SAVE_MS  1000        // storage.set writes at most this often
 #define LH_MESH_PER_S       4
 #define LH_MESH_MAX         200         // bytes of JSON per mesh.send
-#define LH_CALLS_MAX        8           // API requests in flight
+#define LH_CALLS_MAX        16          // server calls waiting or in flight per app
+#define LH_CALLS_SENT       3           // at once in os_api, whose queue the OS shares
 #define LH_JSON_DEPTH       16          // nesting; bounds the decoder's recursion
 #define LH_LED_COUNT        8
 
@@ -58,12 +59,15 @@ typedef struct lh_call {
     uint32_t token;             // os_api ctx: a number, never a pointer
     int cb_ref;
     uint8_t op;
+    uint8_t state;              // LH_CALL_*
     bool done;
     int status;                 // HTTP status, 0 = no answer
     char *body;
     const char *err;            // local outcome: "denied", "offline", ...
-    char *method, *path, *req;  // kept while os_confirm is open
+    char *method, *path, *req;  // until it's sent
 } lh_call_t;
+
+enum { LH_CALL_QUEUED, LH_CALL_CONFIRM, LH_CALL_SENT };
 
 typedef struct lh {
     lua_State *L;
