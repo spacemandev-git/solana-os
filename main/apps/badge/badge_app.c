@@ -29,7 +29,7 @@
 #define CACHE       "cache/me.json"
 #define CACHE_MAX   1024
 
-typedef enum { V_NONE, V_OFFLINE, V_NO_SERVER, V_CONNECTING, V_UNCLAIMED, V_CLAIMED, V_ERROR } view_t;
+typedef enum { V_NONE, V_OFFLINE, V_NO_SERVER, V_CONNECTING, V_UNCLAIMED, V_CLAIMED, V_ERROR, V_LINKED } view_t;
 
 // GET /api/device/me (+ the first unopened pack), live or from the cache.
 typedef struct {
@@ -353,6 +353,9 @@ static view_t view_for(const os_cloud_info_t *in)
     if (!in->server[0]) {
         return V_NO_SERVER;
     }
+    if (in->state == OS_CLOUD_LINKED) {
+        return V_LINKED;
+    }
     if (in->claimed) {
         return V_CLAIMED;           // works offline: os_cloud keeps the figures in NVS
     }
@@ -455,6 +458,13 @@ static void build(const os_cloud_info_t *in, view_t v)
         update_live(in);
         hint = "SELECT retry now  CANCEL exit";
         break;
+    case V_LINKED:
+        // Someone owns this badge but it lost its secret (erased): only a
+        // release on the web frees it. The cloud task keeps asking.
+        // The server's text runs to four lines: no footnote under it.
+        message(LV_SYMBOL_WARNING, COL_YELLOW, "Linked to an account", in->message);
+        hint = "SELECT check again  CANCEL exit";
+        break;
     case V_UNCLAIMED:
         build_unclaimed(in);
         break;
@@ -483,6 +493,7 @@ static void render(bool force)
     view_t v = view_for(in);
     bool same = !force && v == s_shown && !strcmp(in->id, s_last->id) && !strcmp(in->claim_url, s_last->claim_url)
              && !strcmp(in->owner, s_last->owner) && in->error == s_last->error && !strcmp(in->server, s_last->server)
+             && !strcmp(in->message, s_last->message)
              && in->lamps == s_last->lamps && in->level == s_last->level && in->packs == s_last->packs
              && same_me(&s_me, &s_me_shown) && (v != V_CLAIMED || ui_net_state(false) == s_net_shown);
     if (!same) {
