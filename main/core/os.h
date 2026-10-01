@@ -46,8 +46,18 @@ void os_inject_key(os_key_t key);
 // callback. Safe from any task (mesh handlers, API callbacks, timers). Returns
 // false if the queue is full; then fn is not called.
 bool os_post(void (*fn)(void *arg), void *arg);
-void os_toast(const char *fmt, ...);
+void os_toast(const char *fmt, ...);         // any task
 const os_app_t *os_current(void);
+
+// OS-drawn confirm dialog over the current app: SELECT = yes, CANCEL = no.
+// The app (or a Lua script) never sees those keys, so it can't answer for
+// the user: spending !LAMPs, transfers, factory reset. done(yes, ctx) runs on
+// the OS task. Leaving the app (HOME, os_launch) answers no before the app's
+// on_exit. If a confirm is already open, done(false) runs right away. Safe
+// from any task (the text is copied).
+typedef void (*os_confirm_cb_t)(bool yes, void *ctx);
+void os_confirm(const char *text, os_confirm_cb_t done, void *ctx);
+bool os_confirm_open(void);
 
 // Rebuild the UI in the current theme (OS task, LVGL locked; the Settings app).
 void os_theme_apply(void);

@@ -1,12 +1,16 @@
 // Settings: user preferences (core/os_settings) plus shortcuts to system
 // tools. One row per item; SELECT (or LEFT/RIGHT on a choice) changes it.
+// Factory reset asks again in an OS confirm dialog (SELECT twice).
 
+#include <stdio.h>
 #include <string.h>
 #include "core/os.h"
+#include "core/os_api.h"
+#include "core/os_cloud.h"
 #include "core/os_settings.h"
 #include "core/ui.h"
 
-enum { ROW_THEME, ROW_CALIB, ROW_COUNT };
+enum { ROW_THEME, ROW_CALIB, ROW_RESET, ROW_COUNT };
 
 static ui_list_t *s_list;
 
@@ -27,7 +31,37 @@ static void row(int i, ui_row_t *r, void *ctx)
         strlcpy(r->sub, "Map the front buttons again", sizeof(r->sub));
         strlcpy(r->right, LV_SYMBOL_RIGHT, sizeof(r->right));
         break;
+    case ROW_RESET:
+        strlcpy(r->title, "Factory reset", sizeof(r->title));
+        strlcpy(r->sub, "Release the owner, erase Wi-Fi and data", sizeof(r->sub));
+        strlcpy(r->right, LV_SYMBOL_TRASH, sizeof(r->right));
+        r->title_color = COL_ERR;
+        break;
     }
+}
+
+static void reset_answer(bool yes, void *ctx)
+{
+    if (yes) {
+        os_toast("Erasing this badge...");
+        os_cloud_factory_reset();
+    }
+}
+
+// Offline the server can't release the owner: say where to do it.
+static void ask_reset(void)
+{
+    os_cloud_info_t *in = lv_malloc(sizeof(*in));
+    if (!in) {
+        return;
+    }
+    os_cloud_get_info(in);
+    char text[200];
+    snprintf(text, sizeof(text), "Erase this badge? Wi-Fi, apps and data on it are wiped and it restarts. "
+             "Your !LAMPs and pages stay in your account.%s",
+             in->claimed && !os_api_online() ? " Wi-Fi is off: also release it on the web (Profile)." : "");
+    lv_free(in);
+    os_confirm(text, reset_answer, NULL);
 }
 
 static void enter(lv_obj_t *root)
@@ -54,6 +88,9 @@ static bool on_key(os_key_t k, bool repeat)
         break;
     case ROW_CALIB:
         os_launch(&os_calibrate);
+        break;
+    case ROW_RESET:
+        ask_reset();
         break;
     }
     return true;
