@@ -162,6 +162,9 @@ static trade_t *start(const char *tid, const char *peer, const char *name, bool 
     if (!t) {
         return NULL;
     }
+    if (s_t) {
+        os_mesh_pin(s_t->v.peer, false);
+    }
     free(s_t);
     s_t = t;
     strlcpy(t->v.tid, tid, sizeof(t->v.tid));
@@ -170,6 +173,7 @@ static trade_t *start(const char *tid, const char *peer, const char *name, bool 
     t->v.inviter = inviter;
     t->my_lock_mine = t->their_lock_mine = -1;
     game_expect_trade(tid);
+    os_mesh_pin(peer, true);            // a crowd of badges mustn't push the partner out of the table
     return t;
 }
 
@@ -866,6 +870,9 @@ void trade_dismiss(void)
     }
     if (s_t && s_t->v.phase == TRADE_SIGNING) {
         record(s_t);                    // committed: we already signed
+    }
+    if (s_t) {
+        os_mesh_pin(s_t->v.peer, false);
     }
     free(s_t);
     s_t = NULL;
