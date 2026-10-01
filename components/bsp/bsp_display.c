@@ -48,6 +48,7 @@ lv_display_t *bsp_display_start(void)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    port_cfg.task_stack = 8192;     // deep object trees (the Guide's pack reveal) left ~600 B of 7 KB
     ESP_ERROR_CHECK(lvgl_port_init(&port_cfg));
 
     lvgl_port_display_cfg_t disp_cfg = {
