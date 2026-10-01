@@ -264,7 +264,7 @@ static int cmd_server(int argc, char **argv)
 
 static int cmd_cloud(int argc, char **argv)
 {
-    static const char *names[] = {"offline", "connecting", "unclaimed", "claimed", "error"};
+    static const char *names[] = {"offline", "connecting", "unclaimed", "claimed", "error", "linked elsewhere"};
     os_cloud_info_t in;
     os_cloud_get_info(&in);
     printf("cloud: %s%s  server=%s\n  id=%s owner=%s\n  claim=%s\n", names[in.state], in.busy ? " (busy)" : "",
@@ -272,6 +272,9 @@ static int cmd_cloud(int argc, char **argv)
            in.claim_url[0] ? in.claim_url : "-");
     printf("  last http=%d next hello in %d s%s%s\n", in.http_status, in.retry_s, in.error ? "  error: " : "",
            in.error ? in.error : "");
+    if (in.message[0]) {
+        printf("  server: %s\n", in.message);
+    }
     return cmd_heap(0, NULL);
 }
 

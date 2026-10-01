@@ -120,7 +120,7 @@ EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
         }
         bsp_rgb_show();
     } else if (!strcmp(cmd, "cloud")) {
-        static const char *names[] = {"offline", "connecting", "unclaimed", "claimed", "error"};
+        static const char *names[] = {"offline", "connecting", "unclaimed", "claimed", "error", "linked elsewhere"};
         os_cloud_info_t in;
         os_cloud_get_info(&in);
         printf("cloud: %s%s  server=%s\n  id=%s owner=%s\n  claim=%s\n", names[in.state], in.busy ? " (busy)" : "",
