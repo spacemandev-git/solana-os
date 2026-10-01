@@ -170,6 +170,7 @@ typedef struct {
     int status;                     // HTTP status, 0 = no response
     bool ok, claimed;
     bool linked;                    // 409: claimed on the server, and we have no valid secret
+    bool needs_x;                   // "welcome":"needs_x"
     bool deferred;                  // not sent: too little heap right now (e.g. a big app is open)
     char id[16], secret[96], claim_url[160], owner[64];
     char key[33], user[9];
@@ -256,6 +257,8 @@ static void parse(const char *body, hello_t *r)
     const cJSON *owner = cJSON_GetObjectItem(j, "owner");
     const cJSON *time = cJSON_GetObjectItem(j, "time");
     r->claimed = cJSON_IsTrue(cJSON_GetObjectItem(j, "claimed"));
+    const char *welcome = cJSON_GetStringValue(cJSON_GetObjectItem(j, "welcome"));
+    r->needs_x = welcome && !strcmp(welcome, "needs_x");
     r->poll = num_or(j, "poll", POLL_DEFAULT_S);
     r->mesh = num_or(j, "mesh", 0);
     r->lamps = num_or(j, "lamps", 0);
@@ -418,6 +421,7 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
             s_info.lamps = s_info.level = s_info.packs = 0;
         }
         s_info.claimed = r->claimed;
+        s_info.welcome_needs_x = r->claimed && r->needs_x;
         s_info.synced_ms = now_ms();
         s_info.state = r->claimed ? OS_CLOUD_CLAIMED : OS_CLOUD_UNCLAIMED;
         s_info.error = NULL;
@@ -540,6 +544,7 @@ static void cloud_task(void *arg)
             if (online) {
                 online = false;
                 set_offline();
+                os_http_close();        // the connection died with the Wi-Fi; free its TLS state
             }
             while (os_api_service(false)) {
                 // fail what was queued: no network
@@ -570,6 +575,7 @@ static void cloud_task(void *arg)
             if (os_api_service(os_cloud_registered())) {
                 continue;
             }
+            os_http_tick();             // close the server connection when it has been idle a while
             int64_t wait = next - now;
             xTaskNotifyWait(0, UINT32_MAX, &bits, pdMS_TO_TICKS(wait > WIFI_CHECK_MS ? WIFI_CHECK_MS : wait));
             if (bits & BIT_RESET) {

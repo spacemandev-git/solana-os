@@ -147,6 +147,13 @@ esp_err_t os_api_download(const char *path, const char *dest, size_t max_bytes, 
     return enqueue("GET", path, NULL, dest, max_bytes, true, cb, ctx);
 }
 
+void os_api_prewarm(void)
+{
+    if (os_api_online() && !os_http_connected()) {
+        os_cloud_refresh();
+    }
+}
+
 void os_api_cancel(void *ctx)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
