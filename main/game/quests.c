@@ -50,6 +50,7 @@ static char *s_dl_manifest;
 static quest_entry_t *s_log;
 static int s_nlog;
 static int64_t s_log_at;
+static bool s_log_saved;
 static bool s_log_busy;
 static char s_log_error[48];
 
@@ -420,6 +421,7 @@ static void log_save(void)
     }
     cJSON_free(body);
     s_log_at = os_cloud_time_ms();
+    s_log_saved = false;
 }
 
 static void log_from_cache(void)
@@ -429,6 +431,7 @@ static void log_from_cache(void)
     if (body) {
         log_set(cJSON_GetObjectItemCaseSensitive(body, "q"), true);
         s_log_at = at;
+        s_log_saved = true;
     }
     cJSON_Delete(body);
 }
@@ -490,6 +493,11 @@ int quests_log(const quest_entry_t **out)
 {
     *out = s_log;
     return s_nlog;
+}
+
+bool quests_log_saved(void)
+{
+    return s_log_saved;
 }
 
 int64_t quests_log_at(void)

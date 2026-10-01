@@ -115,7 +115,7 @@ static void log_render(void)
         strlcpy(foot, "Checking...", sizeof(foot));
     } else if (err[0]) {
         strlcpy(foot, err, sizeof(foot));
-    } else if (n && !os_api_online()) {
+    } else if (n && quests_log_saved()) {
         game_synced(quests_log_at(), foot, sizeof(foot));
     }
     lv_label_set_text(s->foot, foot);
