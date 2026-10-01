@@ -22,6 +22,8 @@
 #include "lua_pkg.h"
 
 #define LH_OBJ_MAX          64          // UI objects at a time
+#define LH_TEXT_MAX         200         // bytes per label; longer text ends in "..."
+#define LH_TEXT_TOTAL       (6 * 1024)  // label text per app (LVGL keeps it on the system heap)
 #define LH_TIMER_MAX        8
 #define LH_TIMER_MIN_MS     20
 #define LH_TICK_MS          50          // on_tick period
@@ -42,6 +44,7 @@ typedef struct {
     int items_ref, select_ref;  // LH_LIST: registry refs
     uint32_t order;             // creation order: the newest visible list gets Up/Down
     uint16_t gen;               // bumped when freed, so stale handles fail
+    uint16_t text_len;          // LH_LABEL: bytes counted in lh_t.text_total
     uint8_t kind;
 } lh_obj_t;
 
@@ -53,10 +56,11 @@ typedef struct {
 } lh_timer_t;
 
 // One server request (lua_net.c). The Lua task owns the list; the OS-task
-// answer callback finds a record by its token and fills it in under lh_mx.
+// answer callback finds a record by its slot and fills it in under lh_mx.
 typedef struct lh_call {
     struct lh_call *next;
-    uint32_t token;             // os_api ctx: a number, never a pointer
+    uint32_t token;             // os_confirm ctx: a number, never a pointer
+    int8_t slot;                // os_api ctx while sent: &lh_net's slot array
     int cb_ref;
     uint8_t op;
     uint8_t state;              // LH_CALL_*
@@ -79,6 +83,7 @@ typedef struct lh {
     bool mem_hit;               // the allocator refused to go over the cap
     uint32_t steps, steps_peak;
     bool killed;                // over the instruction budget
+    char kill_msg[64];          // "main.lua:12: Script took too long"
     size_t heap_before;         // system heap free at launch
     char err[96];               // why the script stopped, "" if it didn't
     int64_t t0;                 // ms at launch
@@ -92,11 +97,12 @@ typedef struct lh {
     bool finished, orphan;      // task end handshake (under lh_mx)
 
     // UI
-    lv_obj_t *area, *hint, *modal;
+    lv_obj_t *area, *hint, *modal, *loading;
     ui_kb_t *kb;
     int modal_ref;              // ui.confirm / ui.input callback
     lh_obj_t objs[LH_OBJ_MAX];
     uint32_t obj_order;
+    size_t text_total;          // label text bytes on screen
     int key_refs[3];            // "title", "sub", "right": row lookups that never allocate
 
     // LEDs, shown at the end of each callback

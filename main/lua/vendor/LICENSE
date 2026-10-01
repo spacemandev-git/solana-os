@@ -4,8 +4,11 @@ src/ only: the core, lauxlib and the base, coroutine, string, table, math and
 utf8 libraries. Not included: lua.c, luac.c, linit.c and the io, os, package
 (loadlib) and debug libraries. Changes, all marked "Solana OS": in
 luaconf.h LUA_32BITS defaults to 1, LUAI_MAXCCALLS is 64, MAXCCALLS is 32,
-and luai_cstackfull() hooks the host's native C stack guard, which ldo.c
-(ccall) and lstate.c (luaE_incCstack, luaE_checkcstack) also check.
+luai_cstackfull() hooks the host's native C stack guard, which ldo.c
+(ccall) and lstate.c (luaE_incCstack, luaE_checkcstack) also check, and
+luai_userstatethread arms the count hook on new coroutines. lstrlib.c
+charges pattern matching and plain find work to the host's instruction
+budget (luai_patternsteps).
 
 Copyright (C) 1994-2026 Lua.org, PUC-Rio.
 

@@ -361,6 +361,7 @@ typedef struct MatchState {
   const char *p_end;  /* end ('\0') of pattern */
   lua_State *L;
   int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */
+  unsigned int steps;  /* Solana OS: work not yet charged to the host */
   unsigned char level;  /* total number of captures (finished or unfinished) */
   struct {
     const char *init;
@@ -371,6 +372,18 @@ typedef struct MatchState {
 
 /* recursive function */
 static const char *match (MatchState *ms, const char *s, const char *p);
+
+
+/*
+** Solana OS: backtracking patterns can run for minutes in C, where the
+** count hook never fires, so the matcher charges its steps to the host's
+** instruction budget (which raises an error when it runs out).
+*/
+#if !defined(luai_patternsteps)
+#define luai_patternsteps(L,n)	((void)0)
+#endif
+#define PATSTEPS(ms,n)  { if (((ms)->steps += (n)) >= 1024) { \
+    luai_patternsteps((ms)->L, (ms)->steps); (ms)->steps = 0; } }
 
 
 /* maximum recursion depth for 'match' */
@@ -476,7 +489,8 @@ static int singlematch (MatchState *ms, const char *s, const char *p,
     switch (*p) {
       case '.': return 1;  /* matches any char */
       case L_ESC: return match_class(c, uchar(*(p+1)));
-      case '[': return matchbracketclass(c, p, ep-1);
+      case '[': PATSTEPS(ms, (unsigned int)(ep - p));  /* Solana OS */
+                return matchbracketclass(c, p, ep-1);
       default:  return (uchar(*p) == c);
     }
   }
@@ -493,6 +507,7 @@ static const char *matchbalance (MatchState *ms, const char *s,
     int e = *(p+1);
     int cont = 1;
     while (++s < ms->src_end) {
+      PATSTEPS(ms, 1);  /* Solana OS */
       if (*s == e) {
         if (--cont == 0) return s+1;
       }
@@ -506,8 +521,10 @@ static const char *matchbalance (MatchState *ms, const char *s,
 static const char *max_expand (MatchState *ms, const char *s,
                                  const char *p, const char *ep) {
   ptrdiff_t i = 0;  /* counts maximum expand for item */
-  while (singlematch(ms, s + i, p, ep))
+  while (singlematch(ms, s + i, p, ep)) {
     i++;
+    PATSTEPS(ms, 1);  /* Solana OS */
+  }
   /* keeps trying to match with the maximum repetitions */
   while (i>=0) {
     const char *res = match(ms, (s+i), ep+1);
@@ -571,6 +588,7 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
   if (l_unlikely(ms->matchdepth-- == 0))
     luaL_error(ms->L, "pattern too complex");
   init: /* using goto to optimize tail recursion */
+  PATSTEPS(ms, 1);  /* Solana OS */
   if (p != ms->p_end) {  /* end of pattern? */
     switch (*p) {
       case '(': {  /* start capture */
@@ -670,7 +688,7 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
 
 
 
-static const char *lmemfind (const char *s1, size_t l1,
+static const char *lmemfind (lua_State *L, const char *s1, size_t l1,
                                const char *s2, size_t l2) {
   if (l2 == 0) return s1;  /* empty strings are everywhere */
   else if (l2 > l1) return NULL;  /* avoids a negative 'l1' */
@@ -680,6 +698,7 @@ static const char *lmemfind (const char *s1, size_t l1,
     l1 = l1-l2;  /* 's2' cannot be found after that */
     while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
       init++;   /* 1st char is already checked */
+      luai_patternsteps(L, (unsigned int)(l2 / 64 + 1));  /* Solana OS */
       if (memcmp(init, s2+1, l2) == 0)
         return init-1;
       else {  /* correct 'l1' and 's1' to try again */
@@ -757,6 +776,7 @@ static int nospecials (const char *p, size_t l) {
 static void prepstate (MatchState *ms, lua_State *L,
                        const char *s, size_t ls, const char *p, size_t lp) {
   ms->L = L;
+  ms->steps = 0;  /* Solana OS */
   ms->src_init = s;
   ms->src_end = s + ls;
   ms->p_end = p + lp;
@@ -781,7 +801,7 @@ static int str_find_aux (lua_State *L, int find) {
   /* explicit request or no special characters? */
   if (find && (lua_toboolean(L, 4) || nospecials(p, lp))) {
     /* do a plain search */
-    const char *s2 = lmemfind(s + init, ls - init, p, lp);
+    const char *s2 = lmemfind(L, s + init, ls - init, p, lp);
     if (s2) {
       lua_pushinteger(L, (s2 - s) + 1);
       lua_pushinteger(L, (s2 - s) + lp);

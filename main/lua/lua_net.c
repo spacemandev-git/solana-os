@@ -1,9 +1,10 @@
 // mesh, lamps, items, profile and quest for Lua apps (docs/LUA_API.md).
 //
-// Server calls go through os_api with the app id fixed by the host. Each call
-// gets a record with a numeric token (the os_api ctx), so an answer that
-// arrives after the app closed can never touch freed memory: it just finds no
-// record. Spending and transfers wait for os_confirm, which the OS draws on
+// Server calls go through os_api with the app id fixed by the host. A sent
+// call's os_api ctx is one of LH_CALLS_SENT addresses in our own array
+// (unique next to other apps' ctxs); its answer finds the record by that
+// slot, so an answer for a closed app finds nothing and touches no freed
+// memory. Spending and transfers wait for os_confirm, which the OS draws on
 // the top layer and answers from its own keys: a script can't press it.
 
 #include <stdio.h>
@@ -36,6 +37,7 @@ static const struct {
 };
 
 static uint32_t s_token;
+static uint8_t s_slots[LH_CALLS_SENT];  // os_api ctxs of sent calls
 
 // ---------------------------------------------------------------------------
 // Call records
@@ -58,11 +60,11 @@ static void free_call(lh_call_t *c)
 // os_api answer, on the OS task.
 static void api_cb(int status, const char *body, void *ctx)
 {
-    uint32_t token = (uint32_t)(uintptr_t)ctx;
+    int slot = (int)((uint8_t *)ctx - s_slots);
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     lh_t *s = lh_cur;
     for (lh_call_t *c = s ? s->calls : NULL; c; c = c->next) {
-        if (c->token == token && !c->done) {
+        if (c->state == LH_CALL_SENT && c->slot == slot && !c->done) {
             c->status = status;
             c->body = body ? strdup(body) : NULL;
             c->done = true;
@@ -83,7 +85,7 @@ static void finish(lh_call_t *c, const char *err)
 
 static void send(lh_call_t *c)
 {
-    esp_err_t e = os_api_call(c->method, c->path, c->req, 0, api_cb, (void *)(uintptr_t)c->token);
+    esp_err_t e = os_api_call(c->method, c->path, c->req, 0, api_cb, &s_slots[c->slot]);
     free(c->method);
     free(c->path);
     free(c->req);
@@ -98,20 +100,25 @@ static void pump(lh_t *s)
 {
     for (;;) {
         lh_call_t *next = NULL;
-        int sent = 0;
+        uint32_t used = 0;          // slots of calls in os_api
         xSemaphoreTake(lh_mx, portMAX_DELAY);
         for (lh_call_t *c = s->calls; c; c = c->next) {
             if (c->done) {
                 continue;
             }
             if (c->state == LH_CALL_SENT) {
-                sent++;
+                used |= 1u << c->slot;
             } else if (c->state == LH_CALL_QUEUED && !next) {
                 next = c;
             }
         }
-        if (next && sent < LH_CALLS_SENT) {
+        int slot = 0;
+        while (slot < LH_CALLS_SENT && (used & (1u << slot))) {
+            slot++;
+        }
+        if (next && slot < LH_CALLS_SENT) {
             next->state = LH_CALL_SENT;
+            next->slot = slot;
         } else {
             next = NULL;
         }
@@ -297,7 +304,7 @@ void lh_net_stop(lh_t *s)
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     for (lh_call_t *c = s->calls; c; c = c->next) {
         if (!c->done && c->state == LH_CALL_SENT) {
-            os_api_cancel((void *)(uintptr_t)c->token);
+            os_api_cancel(&s_slots[c->slot]);
         }
     }
     xSemaphoreGive(lh_mx);
@@ -319,6 +326,18 @@ void lh_calls_free(lh_t *s)
 static void app_path(lua_State *L, char *out, size_t n, const char *tail)
 {
     snprintf(out, n, "/api/device/apps/%s/%s", lh_get(L)->pkg.id, tail);
+}
+
+// "<App> (<author>)" for the OS confirm dialog. App-supplied text goes
+// through lua_pkg_plain, and the dialog prints the amount and recipient on
+// fixed lines of their own.
+static void app_label(lua_State *L, char *out, size_t n)
+{
+    const lua_pkg_t *p = &lh_get(L)->pkg;
+    char name[21], author[25];
+    lua_pkg_plain(name, sizeof(name), p->name);
+    lua_pkg_plain(author, sizeof(author), p->author);
+    snprintf(out, n, author[0] ? "%s (%s)" : "%s", name, author);
 }
 
 // Ids that go into a URL path: item and badge ids are short and alphanumeric.
@@ -360,10 +379,11 @@ static int l_spend(lua_State *L)
     lua_setfield(L, -2, "amount");
     lua_pushvalue(L, 2);
     lua_setfield(L, -2, "sku");
-    char path[80], lamps[24], q[128];
+    char path[80], lamps[24], app[52], what[33], q[160];
     app_path(L, path, sizeof(path), "lamps/spend");
-    snprintf(q, sizeof(q), "Pay %s to %s for %s?", ui_fmt_lamps(lamps, sizeof(lamps), amount),
-             lh_get(L)->pkg.name, sku);
+    app_label(L, app, sizeof(app));
+    lua_pkg_plain(what, sizeof(what), sku);
+    snprintf(q, sizeof(q), "Pay %s\nto %s\nfor: %s", ui_fmt_lamps(lamps, sizeof(lamps), amount), app, what);
     return start(L, OP_SPEND, "POST", path, 4, 3, q);
 }
 
@@ -381,10 +401,12 @@ static int l_transfer(lua_State *L)
     lua_setfield(L, -2, "amount");
     lua_pushstring(L, memo);
     lua_setfield(L, -2, "memo");
-    char path[80], lamps[24], q[160];
+    char path[80], lamps[24], app[52], note[65], q[224];
     app_path(L, path, sizeof(path), "lamps/transfer");
-    snprintf(q, sizeof(q), "%s: send %s to badge %s?%s%s%s", lh_get(L)->pkg.name,
-             ui_fmt_lamps(lamps, sizeof(lamps), amount), to, memo[0] ? "\n\"" : "", memo, memo[0] ? "\"" : "");
+    app_label(L, app, sizeof(app));
+    lua_pkg_plain(note, sizeof(note), memo);
+    snprintf(q, sizeof(q), "Send %s\nto badge %s\nfrom %s%s%s", ui_fmt_lamps(lamps, sizeof(lamps), amount), to, app,
+             note[0] ? "\nmemo: " : "", note);
     return start(L, OP_TRANSFER, "POST", path, 5, 4, q);
 }
 

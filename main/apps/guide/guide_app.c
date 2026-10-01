@@ -106,7 +106,8 @@ typedef struct {
     item_t items[SHOP_MAX];
     int nitems;
     int64_t shop_at;
-    int buy_sel;
+    char buy_sku[24], buy_name[33];  // what the confirm showed
+    int buy_price;
 } guide_ui_t;
 
 static guide_ui_t *s;
@@ -283,7 +284,7 @@ static void pages_more(void)
     char path[112];
     snprintf(path, sizeof(path), "/api/device/guide/pages?category=%s%s%s", cats[s->cat],
              s->cursor[0] ? "&cursor=" : "", s->cursor);
-    if (os_api_call("GET", path, NULL, 0, got_pages, s->pages) == ESP_OK) {
+    if (os_api_call("GET", path, NULL, 0, got_pages, s->cursor) == ESP_OK) {
         s->loading = true;
     }
 }
@@ -314,7 +315,7 @@ static void pages_open(int cat)
 static void pages_close(void)
 {
     s->mode = V_TABS;
-    os_api_cancel(s->pages);            // a page load in flight
+    os_api_cancel(s->cursor);           // a page load in flight (ctx: a field of s, never NULL)
     s->loading = false;
     lv_obj_set_style_text_color(s->head, ui_col(COL_DIM), 0);
     show_tab(TAB_COLLECTION);
@@ -725,6 +726,8 @@ static void shop_load(void)
     }
 }
 
+static void ask_buy(const char *question);
+
 static void got_buy(int status, const char *body, void *ctx)
 {
     cJSON *j = cJSON_Parse(body);
@@ -743,6 +746,11 @@ static void got_buy(int status, const char *body, void *ctx)
         }
         game_led_flash(COL_LAMPS);
         packs_load();
+    } else if (status == 409 && game_jint(j, "price", -1) >= 0) {
+        // The price changed since the list was fetched: show the new one and ask again.
+        s->buy_price = game_jint(j, "price", 0);
+        shop_load();
+        ask_buy("The price changed.");
     } else if (status == 402) {
         os_toast("Not enough !LAMPs");
     } else {
@@ -753,17 +761,27 @@ static void got_buy(int status, const char *body, void *ctx)
     shop_render();
 }
 
+// The buy carries the price the confirm showed (server/API.md), so a change
+// in between can't spend more than the user agreed to.
 static void buy_confirmed(bool yes, void *ctx)
 {
-    if (!yes || !s || s->buy_sel >= s->nitems) {
+    if (!yes || !s) {
         return;
     }
-    const item_t *it = &s->items[s->buy_sel];
-    char body[64];
-    snprintf(body, sizeof(body), "{\"sku\":\"%s\"}", it->sku);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"sku\":\"%s\",\"price\":%d}", s->buy_sku, s->buy_price);
     if (os_api_call("POST", "/api/device/shop/buy", body, 0, got_buy, s) == ESP_OK) {
-        os_toast("Buying %s...", it->name);
+        os_toast("Buying %s...", s->buy_name);
     }
+}
+
+// Spending: the OS asks, not the app.
+static void ask_buy(const char *lead)
+{
+    char q[128], amt[24];
+    snprintf(q, sizeof(q), "%s%sBuy %s for %s?", lead, lead[0] ? " " : "", s->buy_name,
+             ui_fmt_lamps(amt, sizeof(amt), s->buy_price));
+    os_confirm(q, buy_confirmed, NULL);
 }
 
 static void shop_select(int i)
@@ -780,11 +798,10 @@ static void shop_select(int i)
         os_toast("Turn on Wi-Fi to buy");
         return;
     }
-    // Spending: the OS asks, not the app.
-    char q[96], amt[24];
-    snprintf(q, sizeof(q), "Buy %s for %s?", it->name, ui_fmt_lamps(amt, sizeof(amt), it->price));
-    s->buy_sel = i;
-    os_confirm(q, buy_confirmed, NULL);
+    strlcpy(s->buy_sku, it->sku, sizeof(s->buy_sku));
+    strlcpy(s->buy_name, it->name, sizeof(s->buy_name));
+    s->buy_price = it->price;
+    ask_buy("");
 }
 
 // ---------------------------------------------------------------------------
@@ -968,7 +985,7 @@ static void leave(void)
         return;
     }
     os_api_cancel(s);
-    os_api_cancel(s->pages);
+    os_api_cancel(s->cursor);
     os_api_cancel(s->reading);
     free(s->pages);
     free(s->cards);

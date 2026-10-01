@@ -31,6 +31,12 @@ const char *game_badge_id(void);
 bool game_claimed(void);
 bool game_can_sign(void);
 
+// The mesh task only hands over XDEX messages addressed to us, TRADE
+// messages addressed to us or naming the open trade, and the RELAY_RESP for
+// the request in flight. The services keep these current ("" = none).
+void game_expect_trade(const char *tid);
+void game_expect_relay(const char *beacon, int rid);
+
 // Card {"n","x","lv"} of this badge's owner (MESH.md §2), added to obj.
 void game_add_card(cJSON *obj);
 
