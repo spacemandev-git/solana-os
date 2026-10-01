@@ -4,6 +4,8 @@
 // held (i.e. from app callbacks).
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include "lvgl.h"
 #include "os_keys.h"
 #include "theme.h"
@@ -62,3 +64,50 @@ ui_kb_t *ui_kb_create(lv_obj_t *parent, const char *title, size_t max_len);
 ui_kb_result_t ui_kb_key(ui_kb_t *kb, os_key_t key, bool repeat);
 const char *ui_kb_text(const ui_kb_t *kb);
 void ui_kb_delete(ui_kb_t *kb);
+
+// ---- Amounts, categories, rarities (docs/HHGTS.md "One look") ----
+// Same names and colours as the web. Amounts use sol_mono_12 or the
+// Semi-Mono digits; pick the colour with ui_delta_color().
+
+char *ui_fmt_num(char *out, size_t n, long v);          // "1,250"
+char *ui_fmt_lamps(char *out, size_t n, long amount);   // "1,250 !LAMPs"
+char *ui_fmt_delta(char *out, size_t n, long delta);    // "+50", "-100"
+uint32_t ui_delta_color(long delta);                    // gains COL_LAMPS, spends COL_DIM
+char *ui_fmt_ago(char *out, size_t n, int64_t ms);      // "just now", "5 min ago", "2 h ago", "3 d ago"
+
+// Category ids ("tech") and rarities ("legendary") from the API. Unknown
+// names get COL_DIM / the id itself. Legendary also wants the gradient
+// (ui_gradient_bar) where a bar is drawn.
+uint32_t ui_cat_color(const char *id);
+const char *ui_cat_name(const char *id);                // "Tech docs"
+uint32_t ui_rarity_color(const char *rarity);
+
+// ---- Offline panel ----
+// For apps that need the server (os_api). Create it over the content area;
+// call ui_offline_update() from on_tick (it redraws only on a change and
+// hides itself while the badge is online) and ui_offline_key() first in
+// on_key. Texts, as on the web:
+//   "Wi-Fi is off"          SELECT to connect to <ssid>       (turns Wi-Fi on)
+//   "No network saved"      SELECT to open Wi-Fi
+//   "Connecting to <ssid>"  / "Can't join <ssid>" SELECT to try again
+//   "Wi-Fi is paused"       while a mesh app holds the radio
+//   "Not linked yet"        claim this badge first; SELECT to open My Badge (need_owner)
+
+typedef enum {
+    UI_NET_OK,              // os_api_online() (and claimed, if need_owner)
+    UI_NET_NO_SERVER,       // build without a server and none set
+    UI_NET_NO_NETWORK,      // no saved network
+    UI_NET_WIFI_OFF,        // saved network, Wi-Fi off
+    UI_NET_JOINING,
+    UI_NET_FAILED,
+    UI_NET_PAUSED,          // radio lent to a mesh app or the ESP-NOW scanner
+    UI_NET_REGISTERING,     // joined; first hello with the server not done yet
+    UI_NET_NOT_LINKED,      // need_owner and nobody claimed this badge
+} ui_net_t;
+
+ui_net_t ui_net_state(bool need_owner);
+lv_obj_t *ui_offline_create(lv_obj_t *parent, int y, int h, bool need_owner);
+ui_net_t ui_offline_update(lv_obj_t *panel);
+// SELECT while the panel shows: turn Wi-Fi on, retry, or open Wi-Fi / My
+// Badge. Returns true if it used the key (only SELECT, only while it shows).
+bool ui_offline_key(lv_obj_t *panel, os_key_t key);

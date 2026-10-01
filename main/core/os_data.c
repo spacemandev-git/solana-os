@@ -148,8 +148,11 @@ bool os_data_remove(const char *rel)
     return remove_tree(path);
 }
 
+static volatile uint32_t s_epoch;
+
 void os_data_wipe(void)
 {
+    s_epoch++;
     bsp_sd_info_t sd;
     bsp_sd_get_info(&sd);
     if (sd.state != BSP_SD_MOUNTED) {
@@ -157,4 +160,9 @@ void os_data_wipe(void)
     }
     remove_tree(OS_DATA_DIR);
     ESP_LOGI(TAG, "wiped %s", OS_DATA_DIR);
+}
+
+uint32_t os_data_epoch(void)
+{
+    return s_epoch;
 }

@@ -3,7 +3,11 @@
 #include <stdio.h>
 #include <string.h>
 #include "ui.h"
+#include "os.h"
+#include "os_api.h"
+#include "os_cloud.h"
 #include "os_settings.h"
+#include "os_wifi.h"
 
 bool ui_light(void)
 {
@@ -506,4 +510,293 @@ const char *ui_kb_text(const ui_kb_t *kb)
 void ui_kb_delete(ui_kb_t *kb)
 {
     lv_obj_delete(kb->box);     // frees kb via kb_deleted
+}
+
+// ---------------------------------------------------------------------------
+// Amounts, categories, rarities
+
+char *ui_fmt_num(char *out, size_t n, long v)
+{
+    char digits[24];
+    unsigned long u = v < 0 ? -(unsigned long)v : (unsigned long)v;
+    int len = snprintf(digits, sizeof(digits), "%lu", u);
+    size_t j = 0;
+    if (v < 0 && j + 1 < n) {
+        out[j++] = '-';
+    }
+    for (int i = 0; i < len && j + 1 < n; i++) {
+        if (i && (len - i) % 3 == 0 && j + 1 < n) {
+            out[j++] = ',';
+        }
+        if (j + 1 < n) {
+            out[j++] = digits[i];
+        }
+    }
+    if (n) {
+        out[j < n ? j : n - 1] = 0;
+    }
+    return out;
+}
+
+char *ui_fmt_lamps(char *out, size_t n, long amount)
+{
+    char num[24];
+    snprintf(out, n, "%s !LAMPs", ui_fmt_num(num, sizeof(num), amount));
+    return out;
+}
+
+char *ui_fmt_delta(char *out, size_t n, long delta)
+{
+    char num[24];
+    snprintf(out, n, "%s%s", delta > 0 ? "+" : "", ui_fmt_num(num, sizeof(num), delta));
+    return out;
+}
+
+uint32_t ui_delta_color(long delta)
+{
+    return delta > 0 ? COL_LAMPS : COL_DIM;
+}
+
+char *ui_fmt_ago(char *out, size_t n, int64_t ms)
+{
+    int64_t min = ms / 60000;
+    if (min < 1) {
+        snprintf(out, n, "just now");
+    } else if (min < 60) {
+        snprintf(out, n, "%d min ago", (int)min);
+    } else if (min < 48 * 60) {
+        snprintf(out, n, "%d h ago", (int)(min / 60));
+    } else {
+        snprintf(out, n, "%d d ago", (int)(min / (24 * 60)));
+    }
+    return out;
+}
+
+static const struct {
+    const char *id, *name;
+    uint32_t color;
+} s_cats[] = {
+    {"events", "Events", COL_CAT_EVENTS},
+    {"culture", "Culture", COL_CAT_CULTURE},
+    {"tech", "Tech docs", COL_CAT_TECH},
+    {"releases", "Releases", COL_CAT_RELEASES},
+    {"ecosystem", "Ecosystem", COL_CAT_ECOSYSTEM},
+    {"history", "History", COL_CAT_HISTORY},
+    {"people", "People", COL_CAT_PEOPLE},
+    {"lore", "Lore", COL_CAT_LORE},
+};
+
+uint32_t ui_cat_color(const char *id)
+{
+    for (size_t i = 0; id && i < sizeof(s_cats) / sizeof(s_cats[0]); i++) {
+        if (!strcmp(id, s_cats[i].id)) {
+            return s_cats[i].color;
+        }
+    }
+    return COL_DIM;
+}
+
+const char *ui_cat_name(const char *id)
+{
+    for (size_t i = 0; id && i < sizeof(s_cats) / sizeof(s_cats[0]); i++) {
+        if (!strcmp(id, s_cats[i].id)) {
+            return s_cats[i].name;
+        }
+    }
+    return id ? id : "";
+}
+
+uint32_t ui_rarity_color(const char *r)
+{
+    if (!r) {
+        return COL_DIM;
+    }
+    return !strcmp(r, "rare") ? COL_RARITY_RARE : !strcmp(r, "epic") ? COL_RARITY_EPIC
+         : !strcmp(r, "legendary") ? COL_RARITY_LEGEND : COL_RARITY_COMMON;
+}
+
+// ---------------------------------------------------------------------------
+// Offline panel
+
+typedef struct {
+    bool need_owner;
+    ui_net_t shown;
+    char ssid[33];
+    lv_obj_t *ring, *icon, *title, *body;
+} offline_t;
+
+ui_net_t ui_net_state(bool need_owner)
+{
+    os_cloud_info_t *in = lv_malloc(sizeof(*in));
+    if (!in) {
+        return UI_NET_REGISTERING;
+    }
+    os_cloud_get_info(in);
+    bool server = in->server[0], claimed = in->claimed;
+    lv_free(in);
+    if (os_api_online()) {
+        return need_owner && !claimed ? UI_NET_NOT_LINKED : UI_NET_OK;
+    }
+    if (!server) {
+        return UI_NET_NO_SERVER;
+    }
+    char ssid[33];
+    bool saved = os_wifi_saved_ssid(ssid, sizeof(ssid));
+    switch (os_wifi_state()) {
+    case OS_WIFI_CONNECTED:  return UI_NET_REGISTERING;
+    case OS_WIFI_CONNECTING: return UI_NET_JOINING;
+    case OS_WIFI_FAILED:     return UI_NET_FAILED;
+    case OS_WIFI_SUSPENDED:  return UI_NET_PAUSED;
+    default:                 return saved ? UI_NET_WIFI_OFF : UI_NET_NO_NETWORK;
+    }
+}
+
+static void offline_deleted(lv_event_t *e)
+{
+    lv_free(lv_event_get_user_data(e));
+}
+
+lv_obj_t *ui_offline_create(lv_obj_t *parent, int y, int h, bool need_owner)
+{
+    offline_t *o = lv_malloc_zeroed(sizeof(*o));
+    o->need_owner = need_owner;
+    o->shown = -1;
+    lv_obj_t *p = lv_obj_create(parent);
+    lv_obj_remove_style_all(p);
+    lv_obj_set_pos(p, 0, y);
+    lv_obj_set_size(p, OS_ROOT_W, h);
+    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(p, ui_col(COL_BG), 0);
+    lv_obj_set_scrollable(p, false);
+    lv_obj_set_user_data(p, o);
+    lv_obj_add_event_cb(p, offline_deleted, LV_EVENT_DELETE, o);
+
+    int top = h > 150 ? (h - 150) / 2 : 4;
+    o->ring = lv_obj_create(p);
+    lv_obj_remove_style_all(o->ring);
+    lv_obj_set_size(o->ring, 44, 44);
+    lv_obj_set_style_radius(o->ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(o->ring, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(o->ring, ui_col(COL_PANEL_HI), 0);
+    lv_obj_set_style_border_width(o->ring, 2, 0);
+    lv_obj_align(o->ring, LV_ALIGN_TOP_MID, 0, top);
+    o->icon = ui_label(o->ring, &lv_font_montserrat_20, COL_TEXT, "");
+    lv_obj_center(o->icon);
+    o->title = ui_label(p, &sol_font_20, COL_TEXT, "");
+    lv_obj_set_width(o->title, OS_ROOT_W - 24);
+    lv_label_set_long_mode(o->title, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_style_text_align(o->title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(o->title, LV_ALIGN_TOP_MID, 0, top + 56);
+    o->body = ui_label(p, &sol_font_14, COL_DIM, "");
+    lv_obj_set_width(o->body, OS_ROOT_W - 40);
+    lv_label_set_long_mode(o->body, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_align(o->body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(o->body, LV_ALIGN_TOP_MID, 0, top + 86);
+    ui_offline_update(p);
+    return p;
+}
+
+ui_net_t ui_offline_update(lv_obj_t *panel)
+{
+    offline_t *o = lv_obj_get_user_data(panel);
+    ui_net_t st = ui_net_state(o->need_owner);
+    char ssid[33] = "";
+    if (st == UI_NET_JOINING || st == UI_NET_FAILED) {
+        os_wifi_info_t w;
+        os_wifi_get_info(&w);
+        strlcpy(ssid, w.ssid, sizeof(ssid));
+    } else {
+        os_wifi_saved_ssid(ssid, sizeof(ssid));
+    }
+    if (st == o->shown && !strcmp(ssid, o->ssid)) {
+        return st;
+    }
+    o->shown = st;
+    strlcpy(o->ssid, ssid, sizeof(o->ssid));
+    lv_obj_set_hidden(panel, st == UI_NET_OK);
+
+    const char *icon = LV_SYMBOL_WIFI, *title = "", *body = "";
+    char tbuf[64], bbuf[96];
+    uint32_t col = COL_DIM;
+    switch (st) {
+    case UI_NET_OK:
+        return st;
+    case UI_NET_NO_SERVER:
+        icon = LV_SYMBOL_SETTINGS;
+        title = "No server set";
+        body = "This badge has no server. Set one over USB: server https://<host>";
+        col = COL_YELLOW;
+        break;
+    case UI_NET_NO_NETWORK:
+        title = "No network saved";
+        body = "SELECT to open Wi-Fi";
+        break;
+    case UI_NET_WIFI_OFF:
+        title = "Wi-Fi is off";
+        snprintf(bbuf, sizeof(bbuf), "SELECT to connect to %s", ssid);
+        body = bbuf;
+        break;
+    case UI_NET_JOINING:
+        snprintf(tbuf, sizeof(tbuf), "Connecting to %s", ssid);
+        title = tbuf;
+        body = "One moment...";
+        col = COL_AQUA;
+        break;
+    case UI_NET_FAILED:
+        snprintf(tbuf, sizeof(tbuf), "Can't join %s", ssid);
+        title = tbuf;
+        body = "SELECT to try again";
+        icon = LV_SYMBOL_WARNING;
+        col = COL_ERR;
+        break;
+    case UI_NET_PAUSED:
+        title = "Wi-Fi is paused";
+        body = "The radio is busy with the mesh. It comes back when you leave the app.";
+        icon = LV_SYMBOL_SHUFFLE;
+        col = COL_PINK;
+        break;
+    case UI_NET_REGISTERING:
+        title = "Connecting to the server";
+        body = "One moment...";
+        icon = LV_SYMBOL_REFRESH;
+        col = COL_PURPLE;
+        break;
+    case UI_NET_NOT_LINKED:
+        title = "Not linked yet";
+        body = "Claim this badge first. SELECT to open My Badge";
+        icon = LV_SYMBOL_LOOP;
+        col = COL_LPURPLE;
+        break;
+    }
+    lv_label_set_text(o->icon, icon);
+    lv_obj_set_style_text_color(o->icon, ui_col(col), 0);
+    lv_obj_set_style_border_color(o->ring, ui_col(col), 0);
+    lv_label_set_text(o->title, title);
+    lv_label_set_text(o->body, body);
+    return st;
+}
+
+bool ui_offline_key(lv_obj_t *panel, os_key_t key)
+{
+    if (key != OS_KEY_SELECT || !panel || lv_obj_is_hidden(panel)) {
+        return false;
+    }
+    offline_t *o = lv_obj_get_user_data(panel);
+    switch (o->shown) {
+    case UI_NET_WIFI_OFF:
+    case UI_NET_FAILED:
+        os_wifi_set_enabled(true);
+        os_toast("Connecting to %s", o->ssid);
+        break;
+    case UI_NET_NO_NETWORK:
+        os_launch_id("wifi");
+        break;
+    case UI_NET_NOT_LINKED:
+        os_launch_id("badge");
+        break;
+    default:
+        break;
+    }
+    ui_offline_update(panel);
+    return true;
 }

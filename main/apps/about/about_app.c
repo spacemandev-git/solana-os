@@ -1,8 +1,10 @@
 // About: Solana OS version, badge identity, credits.
 
+#include <stdio.h>
 #include "esp_app_desc.h"
 #include "esp_mac.h"
 #include "core/os.h"
+#include "core/os_cloud.h"
 #include "core/ui.h"
 
 static void enter(lv_obj_t *root)
@@ -14,12 +16,25 @@ static void enter(lv_obj_t *root)
     lv_obj_t *name = ui_label(root, &sol_font_20, COL_TEXT, "Solana OS");
     lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 60);
 
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    // The server's badge ID once it has one, else the end of the MAC.
+    char id[16];
+    os_cloud_info_t *in = lv_malloc(sizeof(*in));
+    if (in) {
+        os_cloud_get_info(in);
+        snprintf(id, sizeof(id), "%s", in->id);
+        lv_free(in);
+    } else {
+        id[0] = 0;
+    }
+    if (!id[0]) {
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(id, sizeof(id), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+    }
     const esp_app_desc_t *d = esp_app_get_description();
     lv_obj_t *ver = ui_label(root, &sol_mono_12, COL_DIM, "");
-    lv_label_set_text_fmt(ver, "v%s  built %s\nbadge %02X%02X%02X  " LV_SYMBOL_BULLET "  %d apps installed",
-                          d->version, d->date, mac[3], mac[4], mac[5], os_app_count);
+    lv_label_set_text_fmt(ver, "v%s  built %s\nbadge %s  " LV_SYMBOL_BULLET "  %d apps installed",
+                          d->version, d->date, id, os_app_count);
     lv_obj_set_style_text_align(ver, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 88);
 

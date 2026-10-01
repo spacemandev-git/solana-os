@@ -7,6 +7,7 @@
 //
 // Only os_mesh uses this. Apps talk through os_mesh.h.
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -32,3 +33,7 @@ esp_err_t os_radio_send(const uint8_t *mac, const uint8_t *data, int len);
 
 // This radio's MAC (the Wi-Fi STA address).
 void os_radio_mac(uint8_t mac[6]);
+
+// While joined to an AP the Wi-Fi driver naps between beacons (modem sleep)
+// and misses ESP-NOW frames. Mesh apps keep the radio awake while they run.
+void os_radio_stay_awake(bool on);

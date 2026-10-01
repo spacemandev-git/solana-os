@@ -4,6 +4,7 @@
 // Output goes to the browser console. Same command names as the badge's
 // console for the parts that make sense in a browser.
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +33,7 @@ static void cmd_wifi(int argc, char **argv)
 {
     const char *sub = argc > 1 ? argv[1] : "status";
     if (!strcmp(sub, "connect") && argc >= 3) {
-        os_wifi_connect(argv[2], argc > 3 ? argv[3] : "");
+        os_wifi_connect_ch(argv[2], argc > 3 ? argv[3] : "", argc > 4 ? atoi(argv[4]) : 0);
         return;
     }
     if (!strcmp(sub, "forget")) {
@@ -52,12 +53,32 @@ static void cmd_wifi(int argc, char **argv)
 
 EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
 {
-    char buf[160];
-    char *argv[8];
+    // Split like the badge's esp_console: spaces separate words, "double
+    // quotes" group them ("wifi connect \"Solana Demo\" pass").
+    static char buf[512];
+    char *argv[16];
     int argc = 0;
     strlcpy(buf, line ? line : "", sizeof(buf));
-    for (char *tok = strtok(buf, " \t"); tok && argc < 8; tok = strtok(NULL, " \t")) {
-        argv[argc++] = tok;
+    for (char *p = buf, *out = buf; *p && argc < 16;) {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        argv[argc++] = out;
+        bool quoted = false;
+        for (; *p && (quoted || (*p != ' ' && *p != '\t')); p++) {
+            if (*p == '"') {
+                quoted = !quoted;
+            } else {
+                *out++ = *p;
+            }
+        }
+        if (*p) {
+            p++;
+        }
+        *out++ = 0;
     }
     if (!argc) {
         return;
@@ -65,7 +86,7 @@ EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
     const char *cmd = argv[0];
     if (!strcmp(cmd, "help")) {
         printf("commands: info, apps, open <id|home|calib>, key <up|down|left|right|select|back|home>...,\n"
-               "          wifi [status|on|off|connect <ssid> [pass]|forget], cloud, server <url|clear>,\n"
+               "          wifi [status|on|off|connect <ssid> [pass [channel]]|forget], cloud, server <url|clear>,\n"
                "          rgb <i|all> <r> <g> <b>, shot, heap\n");
         for (int i = 0; i < os_cmd_count(); i++) {
             printf("          %s\n", os_cmd_get(i)->help);

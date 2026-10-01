@@ -679,11 +679,13 @@ void os_cloud_set_server(const char *url)
     lock();
     bool changed = strcmp(clean, s_info.server) != 0;
     if (changed) {
-        // The ID, secret and mesh key belong to the old server.
+        // The ID, secret, mesh key and owner belong to the old server. The
+        // owner tag stays: a different account there still means new owner.
         strlcpy(s_info.server, clean, sizeof(s_info.server));
-        s_info.id[0] = s_info.claim_url[0] = 0;
+        s_info.id[0] = s_info.claim_url[0] = s_info.owner[0] = s_info.user[0] = 0;
         s_secret[0] = 0;
-        s_info.has_key = false;
+        s_info.has_key = s_info.claimed = false;
+        s_info.lamps = s_info.level = s_info.packs = 0;
         s_info.state = OS_CLOUD_OFFLINE;
         s_info.error = NULL;
         s_next_ms = -1;
@@ -696,6 +698,8 @@ void os_cloud_set_server(const char *url)
         nvs_save("id", "");
         nvs_save("secret", "");
         nvs_save("key", "");
+        nvs_save("owner", "");
+        nvs_save_int("claimed", 0);
         ESP_LOGI(TAG, "server set to '%s'", clean);
     }
     os_cloud_refresh();
