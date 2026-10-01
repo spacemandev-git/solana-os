@@ -15,9 +15,11 @@ endforeach()
 set(SOLANA_OS_SRCS
     core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c
     core/os_mesh.c core/os_api.c core/os_data.c core/os_cmd.c
+    game/game.c game/xdex.c game/trade.c game/quests.c
     apps/registry.c
     apps/wifi/wifi_app.c
     apps/badge/badge_app.c
+    apps/guide/guide_app.c apps/xdex/xdex_app.c apps/trade/trade_app.c apps/quests/quests_app.c
     apps/espnow/espnow_app.c
     apps/skate/skate_app.c
     apps/debug/debug_app.c
