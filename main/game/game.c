@@ -33,7 +33,7 @@ static void tick(void *arg)
     if (in) {
         os_cloud_get_info(in);
         strlcpy(s_id, in->id, sizeof(s_id));
-        s_claimed = in->state == OS_CLOUD_CLAIMED || (in->state != OS_CLOUD_UNCLAIMED && in->user[0]);
+        s_claimed = in->claimed;
         free(in);
     }
     int64_t now = game_now_ms();
@@ -130,7 +130,7 @@ void game_add_card(cJSON *obj)
     int lv = 0;
     if (in) {
         os_cloud_get_info(in);
-        if (in->state == OS_CLOUD_CLAIMED || in->owner[0]) {
+        if (in->claimed) {
             game_ascii(n, sizeof(n), in->owner);
         }
         lv = in->level;
