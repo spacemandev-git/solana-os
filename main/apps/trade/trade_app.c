@@ -12,6 +12,7 @@
 #include "core/os.h"
 #include "core/os_api.h"
 #include "core/os_cloud.h"
+#include "core/os_data.h"
 #include "core/ui.h"
 #include "game/trade.h"
 
@@ -177,7 +178,8 @@ static void show_tab(int tab)
                                                   : "Not linked yet: claim this badge first");
         nearby_refresh();
     } else {
-        ui_list_set_empty(s->list, "Nothing here yet. Trades you sign show up here.");
+        ui_list_set_empty(s->list, os_data_ready() ? "Nothing here yet. Trades you sign show up here."
+                                                   : "No microSD card: trades still upload, but aren't kept here.");
         trade_poll_now();
         trades_refresh();
     }
@@ -727,6 +729,9 @@ static void enter(lv_obj_t *root)
     s->list = ui_list_create(s->home, LIST_Y, LIST_H, home_row, NULL);
     s->hint = ui_hint(root, "");
     show_tab(TAB_NEARBY);
+    if (!os_data_ready()) {
+        os_toast("No microSD card: unsent trades are lost on reboot");
+    }
     if (trade_current()) {
         trade_open_screen();            // e.g. a finished trade not yet dismissed
     }

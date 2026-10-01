@@ -11,6 +11,7 @@
 #include "core/os.h"
 #include "core/os_api.h"
 #include "core/os_cloud.h"
+#include "core/os_data.h"
 #include "core/ui.h"
 #include "game/xdex.h"
 
@@ -30,6 +31,7 @@ typedef struct {
     int tab;
     int tick;
     xdex_phase_t phase;     // last seen, to reload the Yearbook after a swap
+    bool card;              // microSD card present (checked on enter)
     // Nearby
     os_mesh_peer_t peers[PEERS_MAX];
     int npeers, npending;
@@ -195,7 +197,13 @@ static void status_render(void)
             }
             break;
         default:
-            strlcpy(line, s->tab == TAB_NEARBY ? "Hold two badges close and swap cards" : "", sizeof(line));
+            if (!s->card) {
+                // HHGTS.md: without a card, swaps live in RAM until they upload.
+                strlcpy(line, "No microSD card: unsent swaps are lost on reboot", sizeof(line));
+                col = COL_WARN;
+            } else {
+                strlcpy(line, s->tab == TAB_NEARBY ? "Hold two badges close and swap cards" : "", sizeof(line));
+            }
             break;
         }
     }
@@ -409,6 +417,7 @@ static void enter(lv_obj_t *root)
     }
     os_mesh_acquire();
     s->next_bounty = -1;
+    s->card = os_data_ready();
     s->tabs = ui_tabs(root, tab_names, 2);
     s->status = ui_label(root, &sol_mono_12, COL_DIM, "");
     lv_obj_set_pos(s->status, 8, UI_TABS_H + 3);

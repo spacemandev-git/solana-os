@@ -1,8 +1,8 @@
 #pragma once
 
 // X Dex: swap cards with nearby badges (docs/MESH.md §2). Runs in the
-// background so a request from another badge raises a toast in any app; the
-// X Dex app shows the pending requests and starts swaps. Collected cards go to
+// background so requests from other badges wait (60 s) while the X Dex app is
+// closed (os_mesh raises the toast); the app shows them and starts swaps. Collected cards go to
 // /sdcard/hh/xdex.jsonl (RAM without a card) and upload to
 // POST /api/device/xdex, directly when online, else through the outbox.
 // OS task only (see game.h).

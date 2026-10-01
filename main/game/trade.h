@@ -1,7 +1,8 @@
 #pragma once
 
 // Badge-to-badge trades (docs/MESH.md §3). The service owns the state machine
-// so invites raise a toast in any app; the Trade app drives it. Signed trades
+// and keeps invites (60 s) while the Trade app is closed (os_mesh raises the
+// toast); the app drives it. Signed trades
 // are recorded in /sdcard/hh/trades.jsonl and uploaded to
 // POST /api/device/trades (directly when online, else through the outbox);
 // pending ones are polled with GET /api/device/trades/:tid until they settle.
