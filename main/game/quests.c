@@ -680,6 +680,9 @@ static void cmd_status(void)
         }
     }
     free(peers);
+    if (s_rq.kind != RQ_NONE) {
+        printf("rid %d in flight to %s (try %d)%s\n", s_rq.rid, s_rq.beacon, s_rq.tries, s_rq.busy ? ", beacon busy" : "");
+    }
     const quest_dialog_t *d = s_dlg;
     if (d) {
         printf("talking to %s (%s)%s%s %s\n  %s\n", d->name, d->beacon, d->waiting ? " waiting" : "",
