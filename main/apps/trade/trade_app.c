@@ -13,6 +13,7 @@
 #include "core/os_api.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
+#include "core/os_wifi.h"
 #include "core/ui.h"
 #include "game/trade.h"
 
@@ -29,6 +30,8 @@
 #define LAMPS_STEP      5
 #define CANCEL_ARM_MS   3000
 #define GOODS_PAGES     6           // server pages followed per list
+#define GOODS_FRESH_MS  (10 * 60000)
+#define GOODS_WAIT_MS   20000       // longest the radio waits for the goods to load
 
 enum { TAB_NEARBY, TAB_TRADES };
 static const char *const tab_names[] = {"Nearby", "Trades"};
@@ -61,7 +64,8 @@ typedef struct {
     ui_list_t *mine;
     char sig[96];                   // what the trade screen shows, to redraw on change
     int64_t cancel_armed;
-    int ask_mine, ask_theirs;       // revisions shown when the lock confirm opened
+    int ask_mine, ask_theirs;       // revisions shown when the lock / sign confirm opened
+    bool sign_asked;                // the sign confirm opened for this pair of locks
     // Picker
     lv_obj_t *picker;
     ui_list_t *goods_list;
@@ -72,6 +76,8 @@ typedef struct {
     char goods_cursor[48];
     bool goods_items_done;
     int64_t goods_at;
+    bool acquired;                  // holding the mesh radio
+    int64_t opened;
 } trade_ui_t;
 
 static trade_ui_t *s;
@@ -174,8 +180,9 @@ static void show_tab(int tab)
     ui_tabs_select(s->tabs, tab);
     ui_list_select(s->list, 0);
     if (tab == TAB_NEARBY) {
-        ui_list_set_empty(s->list, game_claimed() ? "No badges nearby yet. Badges show up here when they're in range."
-                                                  : "Not linked yet: claim this badge first");
+        ui_list_set_empty(s->list, !game_claimed() ? "Not linked yet: claim this badge first"
+                                   : !s->acquired ? "Loading your items and pages, then looking for badges..."
+                                                  : "No badges nearby yet. Badges show up here when they're in range.");
         nearby_refresh();
     } else {
         ui_list_set_empty(s->list, os_data_ready() ? "Nothing here yet. Trades you sign show up here."
@@ -403,24 +410,28 @@ static void mine_row(int i, ui_row_t *r, void *ctx)
         return;
     }
     switch (i) {
-    case R_LOCK:
+    case R_LOCK: {
+        char line[64] = "";
+        r->title_color = COL_AQUA;
         if (t->phase != TRADE_OPEN) {
-            strlcpy(r->title, t->phase == TRADE_SIGNING ? "Signing..." : "Lock offer", sizeof(r->title));
+            strlcpy(r->title, "Lock offer", sizeof(r->title));
             r->title_color = COL_DIM;
+        } else if (t->can_sign) {
+            strlcpy(r->title, "Sign the trade", sizeof(r->title));
+            strlcpy(line, "Both locked", sizeof(line));
+            strlcpy(r->right, "SELECT sign", sizeof(r->right));
         } else if (t->i_locked) {
             strlcpy(r->title, LV_SYMBOL_OK " Locked", sizeof(r->title));
-            r->title_color = COL_AQUA;
-            char line[64];
             snprintf(line, sizeof(line), t->they_locked ? "Signing..." : "Waiting for %s to lock", t->label);
-            game_clip(r->sub, sizeof(r->sub), line);
             strlcpy(r->right, "SELECT unlock", sizeof(r->right));
         } else {
             strlcpy(r->title, "Lock offer", sizeof(r->title));
-            r->title_color = COL_AQUA;
-            strlcpy(r->sub, t->they_locked ? "They locked. Lock too and the trade signs" : "When both lock, the trade signs",
-                    sizeof(r->sub));
+            // The joiner's lock is its signature; the inviter signs after both lock.
+            strlcpy(line, t->inviter ? "Lock, then sign once they lock too" : "Locking signs the trade", sizeof(line));
         }
+        game_clip(r->sub, sizeof(r->sub), line);
         break;
+    }
     case R_LAMPS: {
         char bal[24];
         ui_fmt_lamps(r->title, sizeof(r->title), t->mine.lamps);
@@ -505,7 +516,7 @@ static void render_trade(bool force)
     strlcpy(s->sig, sig, sizeof(s->sig));
     lv_label_set_text_fmt(s->title, "Trade with %s", t->label);
 
-    static const char *const phases[] = {"", "INVITED", "OPEN", "SIGNING", "SIGNED", "CANCELLED"};
+    static const char *const phases[] = {"", "INVITED", "OPEN", "WAITING", "SIGNED", "CANCELLED"};
     lv_label_set_text(s->phase, t->settled ? "SETTLED" : t->rejected ? "REJECTED" : phases[t->phase]);
     lv_obj_set_style_text_color(s->phase, ui_col(t->rejected ? COL_ERR : t->phase == TRADE_DONE ? COL_GREEN
                                                  : t->phase == TRADE_CANCELLED ? COL_ERR : COL_DIM), 0);
@@ -531,6 +542,11 @@ static void render_trade(bool force)
         lv_label_set_text(s->theirs_head, "CANCELLED");
         strlcpy(text, t->reason, sizeof(text));
         break;
+    case TRADE_SIGNING:
+        // Our tag is out: the trade can settle now, so there's no cancel.
+        lv_label_set_text(s->theirs_head, "SIGNED");
+        snprintf(text, sizeof(text), "Signed. Waiting for %s", t->label);
+        break;
     default:
         lv_label_set_text_fmt(s->theirs_head, "%s GIVES%s", t->label, t->they_locked ? "  " LV_SYMBOL_OK " LOCKED" : "");
         bundle_text(&t->theirs, text, sizeof(text));
@@ -541,12 +557,41 @@ static void render_trade(bool force)
     }
     lv_label_set_text(s->theirs, text);
     lv_obj_set_style_text_color(s->theirs_head, ui_col(t->they_locked ? COL_AQUA : COL_DIM), 0);
-    bool open = t->phase == TRADE_OPEN || t->phase == TRADE_SIGNING;
+    bool open = t->phase == TRADE_OPEN;
     ui_list_show(s->mine, open);
     if (open) {
         ui_list_set_count(s->mine, R_FIXED + t->mine.nitems + t->mine.npages);
     }
     set_hint();
+}
+
+// Inviter, both locked: the deliberate step that sends our signature.
+static void sign_confirmed(bool yes, void *ctx)
+{
+    const trade_view_t *t = trade_current();
+    if (!s || !t || !t->can_sign) {
+        return;
+    }
+    if (!yes) {
+        trade_lock(false);              // not now: unlock, so they see it
+    } else if (t->my_rev != s->ask_mine || t->their_rev != s->ask_theirs) {
+        os_toast("The offers changed. Check them and lock again");
+        return;
+    } else {
+        trade_sign();
+    }
+    render_trade(false);
+}
+
+static void ask_sign(const trade_view_t *t)
+{
+    char q[128];
+    snprintf(q, sizeof(q), "You both locked. Sign the trade with %s? Once you sign, it can settle even if you cancel.",
+             t->label);
+    s->ask_mine = t->my_rev;
+    s->ask_theirs = t->their_rev;
+    s->sign_asked = true;
+    os_confirm(q, sign_confirmed, NULL);
 }
 
 static void lock_confirmed(bool yes, void *ctx)
@@ -577,7 +622,10 @@ static bool trade_key(os_key_t k, bool repeat)
         return true;
     }
     if (k == OS_KEY_BACK) {
-        if (repeat || t->phase == TRADE_SIGNING) {
+        if (t->phase == TRADE_SIGNING) {
+            return repeat;              // leave; the signed trade is recorded on exit
+        }
+        if (repeat) {
             return true;
         }
         int64_t now = game_now_ms();
@@ -616,15 +664,18 @@ static bool trade_key(os_key_t k, bool repeat)
     }
     switch (sel) {
     case R_LOCK:
-        if (t->i_locked) {
+        if (t->can_sign) {
+            ask_sign(t);
+        } else if (t->i_locked) {
             trade_lock(false);
+        } else if (t->inviter) {
+            trade_lock(true);           // nothing is signed until trade_sign()
         } else {
-            // Locking can make the trade final: the OS asks, not the app.
-            char q[96];
-            snprintf(q, sizeof(q), "Lock your offer? The trade signs as soon as %s locks too.", t->label);
+            // The joiner signs as soon as the terms arrive: this is its commitment.
             s->ask_mine = t->my_rev;
             s->ask_theirs = t->their_rev;
-            os_confirm(q, lock_confirmed, NULL);
+            os_confirm("Locking signs the trade. Once you both lock, it can settle even if you cancel.", lock_confirmed,
+                       NULL);
         }
         break;
     case R_LAMPS:
@@ -693,11 +744,11 @@ static void set_hint(void)
             h = "CANCEL x2 cancel";
             break;
         case TRADE_SIGNING:
-            h = "Signing...";
+            h = "CANCEL leave";
             break;
         default:
             h = sel == R_LAMPS ? LV_SYMBOL_LEFT LV_SYMBOL_RIGHT " amount  CANCEL x2 cancel"
-              : sel == R_LOCK  ? "SELECT lock / unlock  CANCEL x2 cancel"
+              : sel == R_LOCK  ? (t->can_sign ? "SELECT sign  CANCEL x2 cancel" : "SELECT lock / unlock  CANCEL x2 cancel")
               : sel == R_ADD   ? "SELECT add  CANCEL x2 cancel"
                                : "SELECT remove  CANCEL x2 cancel";
             break;
@@ -712,6 +763,33 @@ static void set_hint(void)
     lv_label_set_text(s->hint, h);
 }
 
+// Trading needs the radio on the mesh channel, which pauses Wi-Fi joined on
+// another channel. Load what you can offer first in that case, so the picker
+// has it while the server is out of reach.
+static bool goods_first(void)
+{
+    os_wifi_info_t w;
+    os_wifi_get_info(&w);
+    if (!os_api_online() || w.channel == os_mesh_channel() || !(s->goods = calloc(GOODS_MAX, sizeof(good_t)))) {
+        return false;
+    }
+    goods_from_cache();
+    int64_t now = os_cloud_time_ms();
+    if (s->goods_at && now && now - s->goods_at < GOODS_FRESH_MS) {
+        return false;
+    }
+    goods_load();
+    return s->goods_loading;
+}
+
+static void radio_on(void)
+{
+    if (!s->acquired) {
+        s->acquired = true;
+        os_mesh_acquire();
+    }
+}
+
 static void enter(lv_obj_t *root)
 {
     s = calloc(1, sizeof(*s));
@@ -719,7 +797,10 @@ static void enter(lv_obj_t *root)
         ui_label(root, &sol_font_14, COL_ERR, "Out of memory");
         return;
     }
-    os_mesh_acquire();
+    s->opened = game_now_ms();
+    if (!goods_first()) {
+        radio_on();
+    }
     s->root = root;
     s->home = lv_obj_create(root);
     lv_obj_remove_style_all(s->home);
@@ -744,7 +825,9 @@ static void leave(void)
     }
     trade_dismiss();                    // cancels an open trade; the peer is told
     os_api_cancel(s);
-    os_mesh_release();
+    if (s->acquired) {
+        os_mesh_release();
+    }
     free(s->recs);
     free(s->goods);
     free(s);
@@ -804,6 +887,10 @@ static void on_tick(void)
         return;
     }
     s->tick++;
+    if (!s->acquired && (!s->goods_loading || game_now_ms() - s->opened > GOODS_WAIT_MS)) {
+        radio_on();
+        show_tab(s->tab);
+    }
     if (s->view == V_HOME) {
         const trade_view_t *t = trade_current();
         if (t && t->phase != TRADE_IDLE) {
@@ -818,6 +905,13 @@ static void on_tick(void)
         }
     } else if (s->view == V_TRADE && s->tick % 3 == 0) {
         render_trade(false);
+        // Both locked: ask the inviter to sign, once per pair of locks.
+        const trade_view_t *t = trade_current();
+        if (t && !t->can_sign) {
+            s->sign_asked = false;
+        } else if (t && !s->sign_asked && !os_confirm_open()) {
+            ask_sign(t);
+        }
     }
 }
 

@@ -50,6 +50,7 @@ typedef struct {
     trade_bundle_t mine, theirs;
     int my_rev, their_rev;
     bool i_locked, they_locked;         // valid for the current revisions
+    bool can_sign;                      // inviter, both locked: trade_sign() sends our signature
     bool settled, rejected;             // the server's answer, once it came (TRADE_DONE)
     char reason[48];                    // why it was cancelled or rejected
 } trade_view_t;
@@ -78,9 +79,12 @@ bool trade_set_lamps(int lamps);
 bool trade_add(bool page, const char *id, const char *name, const char **why);
 void trade_remove(bool page, int index);
 int trade_count_of(bool page, const char *id);  // copies of id in my offer
-// Lock = happy with both offers as they are now. When both sides lock, the
-// trade signs itself (terms, sign, done).
+// Lock = happy with both offers as they are now. For the joiner (B) a lock
+// is final: B signs as soon as valid terms arrive. The inviter (A) signs with
+// trade_sign() once both are locked (after the user confirms). Once a
+// signature is out the trade can settle, whatever happens next.
 void trade_lock(bool on);
+void trade_sign(void);
 
 // Recorded trades, newest first (malloc'd *out, free it).
 typedef enum { TRADE_REC_PENDING, TRADE_REC_UNCONFIRMED, TRADE_REC_SETTLED, TRADE_REC_REJECTED } trade_rec_status_t;
