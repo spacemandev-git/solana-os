@@ -525,7 +525,16 @@ static void packs_render(void)
     snprintf(left, sizeof(left), "%d unopened", s->npacks);
     head_set(left, s->packs_at);
     offline_show(!s->packs_at);
-    ui_list_set_empty(s->list, s->packs_at ? "No packs. Get one in the Shop." : loading_text());
+    os_cloud_info_t *in = malloc(sizeof(*in));
+    bool needs_x = false;
+    if (in) {
+        os_cloud_get_info(in);
+        needs_x = in->welcome_needs_x;
+        free(in);
+    }
+    ui_list_set_empty(s->list, !s->packs_at ? loading_text()
+                               : needs_x ? "Link X on the web to get your Starter Pack"
+                                         : "No packs. Get one in the Shop.");
     ui_list_set_count(s->list, s->npacks);
 }
 

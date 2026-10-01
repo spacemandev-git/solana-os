@@ -22,6 +22,7 @@ typedef struct {
     int lv;
     int64_t at;                         // unix ms collected (0 = unknown)
     int bounty;                         // !LAMPs it paid, -1 = not known yet
+    int8_t verified;                    // counts for bounty and Level (both owners linked X); -1 = not known
 } xdex_card_t;
 
 typedef struct {
@@ -59,6 +60,8 @@ typedef struct {
     xdex_upload_t upload;
     int bounty;
     bool fresh;                         // a badge we hadn't collected before
+    bool unverified;                    // collected, but no bounty until both owners link X
+    bool needs_x;                       // we're the one who hasn't linked X
     char error[48];
 } xdex_swap_t;
 

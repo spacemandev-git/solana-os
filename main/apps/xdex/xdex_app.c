@@ -47,6 +47,7 @@ typedef struct {
     char cursor[48];        // next server page, "" = none
     bool loading;
     int next_bounty;        // -1 = unknown
+    bool needs_x;           // the owner hasn't linked X: swaps pay no bounty yet
     int64_t synced_at;      // cached server data, unix ms
 } xdex_ui_t;
 
@@ -187,6 +188,8 @@ static void status_render(void)
                 if (x->bounty > 0) {
                     snprintf(line, sizeof(line), "Got %s's card  +%d !LAMPs", x->label, x->bounty);
                     col = COL_LAMPS;
+                } else if (x->unverified) {
+                    snprintf(line, sizeof(line), "Got %s's card. No bounty: needs X on both sides", x->label);
                 } else {
                     snprintf(line, sizeof(line), "%s's card updated", x->label);
                 }
@@ -215,12 +218,14 @@ static void status_render(void)
         }
     }
     if (s->tab == TAB_YEARBOOK && x->phase == XDEX_IDLE && game_claimed() && in->has_key) {
-        if (s->next_bounty >= 0) {
+        if (s->needs_x) {
+            strlcpy(line, "Link X on the web to earn bounties", sizeof(line));
+        } else if (s->next_bounty >= 0) {
             snprintf(line, sizeof(line), "Lv %d  " LV_SYMBOL_BULLET "  next new card +%d !LAMPs", in->level, s->next_bounty);
         } else {
             snprintf(line, sizeof(line), "Lv %d", in->level);
         }
-        col = COL_TEXT;
+        col = s->needs_x ? COL_WARN : COL_TEXT;
     }
     free(in);
     lv_label_set_text(s->status, line);
@@ -234,7 +239,9 @@ static void yearbook_row(int i, ui_row_t *r)
 {
     const xdex_card_t *c = &s->cards[i];
     game_peer_label(c->n, c->id, r->title, sizeof(r->title));
-    if (c->x[0]) {
+    if (c->verified == 0) {
+        strlcpy(r->sub, "No bounty: needs X on both sides", sizeof(r->sub));
+    } else if (c->x[0]) {
         snprintf(r->sub, sizeof(r->sub), "@%s  " LV_SYMBOL_BULLET "  Lv %d  " LV_SYMBOL_BULLET "  %s", c->x, c->lv, c->id);
     } else {
         snprintf(r->sub, sizeof(r->sub), "Lv %d  " LV_SYMBOL_BULLET "  %s", c->lv, c->id);
@@ -251,6 +258,9 @@ static void merge_card(const xdex_card_t *c)
         if (!strcmp(s->cards[i].id, c->id)) {
             if (c->bounty >= 0) {
                 s->cards[i].bounty = c->bounty;
+            }
+            if (c->verified >= 0) {
+                s->cards[i].verified = c->verified;
             }
             if (!s->cards[i].n[0]) {
                 strlcpy(s->cards[i].n, c->n, sizeof(c->n));
@@ -275,6 +285,8 @@ static void merge_server(const cJSON *items)
         game_ascii(c.x, sizeof(c.x), game_jstr(card, "x"));
         c.lv = game_jint(card, "lv", 0);
         c.bounty = game_jint(e, "bounty", -1);
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(e, "verified");
+        c.verified = cJSON_IsBool(v) ? cJSON_IsTrue(v) : -1;
         const cJSON *at = cJSON_GetObjectItemCaseSensitive(e, "at");
         c.at = cJSON_IsNumber(at) ? (int64_t)at->valuedouble : 0;
         if (c.id[0]) {
@@ -309,6 +321,7 @@ static void got_page(int status, const char *body, void *ctx)
         s->synced_at = os_cloud_time_ms();
     }
     merge_server(cJSON_GetObjectItemCaseSensitive(j, "items"));
+    s->needs_x = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "needsX"));
     strlcpy(s->cursor, game_jstr(j, "next"), sizeof(s->cursor));
     cJSON_Delete(j);
     yearbook_show();
@@ -322,6 +335,7 @@ static void got_me(int status, const char *body, void *ctx)
     }
     cJSON *j = cJSON_Parse(body);
     s->next_bounty = game_jint(j, "nextBounty", -1);
+    s->needs_x = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "needsX"));
     os_cloud_info_t *in = malloc(sizeof(*in));
     if (in) {
         os_cloud_get_info(in);
@@ -364,6 +378,7 @@ static void yearbook_load(void)
     cJSON_Delete(cached);
     cJSON *me = game_cache_get("me", NULL);
     s->next_bounty = game_jint(me, "nextBounty", -1);
+    s->needs_x = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(me, "needsX"));
     cJSON_Delete(me);
     yearbook_show();
     if (os_api_online()) {

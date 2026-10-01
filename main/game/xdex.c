@@ -87,6 +87,7 @@ static void card_from_json(xdex_card_t *c, const char *id, const cJSON *card)
     game_ascii(c->x, sizeof(c->x), game_jstr(card, "x"));
     c->lv = game_jint(card, "lv", 0);
     c->bounty = -1;
+    c->verified = -1;
 }
 
 static cJSON *card_to_json(const xdex_card_t *c)
@@ -169,6 +170,9 @@ static void toast_result(void)
     case XDEX_UP_DONE:
         if (s_last.bounty > 0) {
             os_toast("%s's card: +%d !LAMPs", s_last.label, s_last.bounty);
+        } else if (s_last.unverified) {
+            os_toast(s_last.needs_x ? "Got %s's card. Link X on the web to earn bounties"
+                                    : "Got %s's card. No bounty: needs X on both sides", s_last.label);
         } else {
             os_toast("%s's card updated", s_last.label);
         }
@@ -211,6 +215,8 @@ static void uploaded(int status, const char *body, void *ctx)
             s_last.upload = ok ? XDEX_UP_DONE : XDEX_UP_REFUSED;
             s_last.bounty = game_jint(res, "bounty", 0);
             s_last.fresh = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(res, "new"));
+            s_last.unverified = cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(res, "verified"));
+            s_last.needs_x = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "needsX"));
             strlcpy(s_last.error, ok ? "" : game_jstr(res, "error"), sizeof(s_last.error));
             if (!ok && !s_last.error[0]) {
                 strlcpy(s_last.error, "not accepted", sizeof(s_last.error));
@@ -275,6 +281,7 @@ static void swapped(xdex_card_t *c, const char *nonce, const char *tag)
     set_phase(XDEX_SWAPPED, c->id, c->n);
     s_last.bounty = 0;
     s_last.fresh = false;
+    s_last.unverified = s_last.needs_x = false;
     s_last.error[0] = 0;
     game_led_flash(COL_PINK);
     ESP_LOGI(TAG, "collected %s (%s)", c->id, c->n);
