@@ -39,8 +39,9 @@ firmware/emulator/
 | `core/os.c`, `launcher.c`, `calibrate.c`, `ui.c`, `os_cloud.c`, `apps/*`, `assets/*` | same file | same file |
 | LVGL 9.6 | managed component, Kconfig | same sources; `LV_CONF_SKIP` + `LV_CONF_KCONFIG_EXTERNAL_INCLUDE="sdkconfig.h"` generated from the badge's sdkconfig |
 | `app_main.c` | boot order | `platform/app_main_emu.c` (same order, plus `os_cloud_set_server(location.origin)`) |
-| `core/os_wifi.c` | ESP-IDF Wi-Fi STA | `platform/os_wifi_emu.c`: demo networks, joining always works, fake IP, same NVS keys |
-| `core/os_http.c` | esp_http_client | `platform/os_http_emu.c`: `fetch()` against the page's origin |
+| `core/os_wifi.c` | ESP-IDF Wi-Fi STA, off at boot, parks the radio on the mesh channel | `platform/os_wifi_emu.c`: demo networks, joining always works, fake IP, same NVS keys, same off-at-boot and channel rules |
+| `core/os_http.c` | esp_http_client (requests and streamed downloads) | `platform/os_http_emu.c`: `fetch()` against the page's origin; downloads land in the emulated SD card |
+| `core/os_radio.c` (mesh) | ESP-NOW | `platform/os_radio_emu.c`: `BroadcastChannel("solana-os-mesh")` between tabs of one origin (docs/MESH.md "Emulator transport"), on the emulated radio's channel |
 | `core/console.c` | UART REPL | `platform/console_emu.c`: `emu_console("open wifi")` from the page |
 | `bsp_display.c` | ILI9341 + esp_lvgl_port | `bsp_display_emu.c`: 2 x 320x24 partial buffers, RGBA framebuffer for a `<canvas>` |
 | `bsp_buttons.c` | TCA9534 + BOOT, button task | `bsp_buttons_emu.c`: page sets the raw lines, same task/callback shape |
@@ -48,12 +49,30 @@ firmware/emulator/
 | `bsp_battery.c` | ADC | `bsp_battery_emu.c`: slowly draining fake reading |
 | `bsp_sd.c` | SPI microSD + FatFs | `bsp_sd_emu.c`: 64 MB card in MEMFS (stdio/dirent work, `readdir` hides `.`/`..` like FatFs) |
 | promiscuous Wi-Fi (`espnow_app.c`) | real radio | `esp_wifi_emu.c`: real 802.11 vendor action frames on the tuned channel |
-| NVS | flash | `esp_emu.c`: localStorage (`solana-os-emu:nvs`) |
+| NVS | flash | `esp_emu.c`: localStorage (`solana-os-emu:nvs`, or `solana-os-emu:<n>:nvs` with `?badge=<n>`) |
 
 Values the firmware prints are honest: ESP-IDF version "browser emulator", a
 random locally administered MAC (kept in localStorage), wasm heap figures.
 `os_cloud.c` gets `-DOS_CLOUD_MODEL="emulator" -DOS_CLOUD_HW_PREFIX="emu-"`, so
 the server sees model `emulator` and hw `emu-<mac>`.
+
+### Two badges: the mesh
+
+`os_mesh.c` is the badge's own file; only the radio below it differs. Every
+tab of the site's origin hears the others' frames, so two tabs are two badges
+talking ESP-NOW, and the web beacon simulator (`/admin/beacon-sim`) joins the
+same channel. Give the second tab its own identity with a query:
+
+- `/emulator` and `/emulator?badge=2` (any short tag) keep separate MACs, NVS
+  (server secret, mesh key, Wi-Fi) and so separate badge IDs on the server.
+- Badges only transmit with a server-assigned ID: turn Wi-Fi on once in each
+  tab so they say hello, then Wi-Fi off (the radio parks on the mesh channel;
+  joined to a demo network on another channel, the mesh is quiet until a
+  mesh app acquires it, exactly like the badge).
+- Browsers throttle timers in background tabs to about once a second, which
+  slows a hidden badge to a crawl. Put the two tabs side by side, or load both
+  pages as iframes in one visible page.
+- Console: `mesh status`, `mesh peers`, `mesh log on`, `mesh send app * big 700`.
 
 ### Tasks and timing
 
@@ -95,7 +114,8 @@ side is `web/src/lib/components/emulator/emulator.ts`.
 ## Limitations
 
 - Radios are simulated demo data (browsers
-  can't sniff Wi-Fi). Wi-Fi joins any demo network with any password.
+  can't sniff Wi-Fi). Wi-Fi joins any demo network with any password. The
+  mesh is real between tabs of one origin, but has no range or packet loss.
 - The SD card is in memory and resets on reload. The battery is a fake.
 - No real heap limit: the badge has ~125 KB free, the wasm heap has megabytes,
   so out-of-memory paths are not exercised. Check `heap` on the badge.
