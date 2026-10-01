@@ -16,6 +16,7 @@
 #include "core/os.h"
 #include "core/os_wifi.h"
 #include "core/os_cloud.h"
+#include "core/os_cmd.h"
 
 static const char *TAG = "console";
 
@@ -62,6 +63,9 @@ EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
         printf("commands: info, apps, open <id|home|calib>, key <up|down|left|right|select|back|home>...,\n"
                "          wifi [status|connect <ssid> [pass]|forget], cloud, server <url|clear>,\n"
                "          rgb <i|all> <r> <g> <b>, shot, heap\n");
+        for (int i = 0; i < os_cmd_count(); i++) {
+            printf("          %s\n", os_cmd_get(i)->help);
+        }
     } else if (!strcmp(cmd, "info")) {
         int mv = bsp_battery_mv();
         printf("Solana OS %s (browser emulator)\nBattery: %d mV (%d%%)\nButtons: 0x%02lX\n",
@@ -106,7 +110,7 @@ EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT),
                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
-    } else {
+    } else if (os_cmd_run(argc, argv) < 0) {
         printf("unknown command '%s', try 'help'\n", cmd);
     }
 }

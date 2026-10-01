@@ -21,6 +21,7 @@
 #include "os.h"
 #include "os_wifi.h"
 #include "os_cloud.h"
+#include "os_cmd.h"
 
 static const char *TAG = "console";
 
@@ -317,6 +318,12 @@ void console_start(void)
     };
     for (int i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));
+    }
+    // Commands from portable code (os_cmd.h): same signature as esp_console's.
+    for (int i = 0; i < os_cmd_count(); i++) {
+        const os_cmd_t *c = os_cmd_get(i);
+        const esp_console_cmd_t ec = { .command = c->name, .help = c->help, .func = c->fn };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&ec));
     }
     esp_console_register_help_command();
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
