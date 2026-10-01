@@ -25,9 +25,6 @@ static const char *TAG = "quests";
 #define PING_MS         10000
 #define REQ_MAX         96
 #define APP_MAX         (64 * 1024)
-#define NEARBY_EVERY_MS 1000
-#define NEARBY_QUIET_MS (10 * 60000)    // toast a beacon again after 10 min away
-#define NEARBY_SEEN     6
 
 typedef enum { RQ_NONE, RQ_DIALOG, RQ_PING, RQ_LOG, RQ_APP } rq_kind_t;
 
@@ -56,11 +53,6 @@ static int64_t s_log_at;
 static bool s_log_busy;
 static char s_log_error[48];
 
-static struct {
-    char id[OS_MESH_ID_LEN + 1];
-    int64_t seen;
-} s_nearby[NEARBY_SEEN];
-static int64_t s_nearby_at;
 
 // ---------------------------------------------------------------------------
 // Relay client
@@ -592,47 +584,8 @@ void quests_on_mesh(const os_mesh_peer_t *from, cJSON *msg)
 
 // ---------------------------------------------------------------------------
 
-// "<character> is nearby" once per beacon, again after it was gone a while.
-static void nearby(int64_t now)
-{
-    if (now - s_nearby_at < NEARBY_EVERY_MS) {
-        return;
-    }
-    s_nearby_at = now;
-    os_mesh_peer_t *peers = malloc(8 * sizeof(os_mesh_peer_t));
-    int n = peers ? os_mesh_peers(peers, 8) : 0;
-    for (int i = 0; i < n; i++) {
-        if (peers[i].kind != OS_PEER_BEACON || !peers[i].name[0]) {
-            continue;
-        }
-        int slot = -1, oldest = 0;
-        for (int k = 0; k < NEARBY_SEEN; k++) {
-            if (!strcmp(s_nearby[k].id, peers[i].id)) {
-                slot = k;
-                break;
-            }
-            if (s_nearby[k].seen < s_nearby[oldest].seen) {
-                oldest = k;
-            }
-        }
-        bool toast = slot < 0 || now - s_nearby[slot].seen > NEARBY_QUIET_MS;
-        if (slot < 0) {
-            slot = oldest;
-            strlcpy(s_nearby[slot].id, peers[i].id, sizeof(s_nearby[slot].id));
-        }
-        s_nearby[slot].seen = now;
-        if (toast && !(s_dlg && !strcmp(s_dlg->beacon, peers[i].id))) {
-            char name[25];
-            game_ascii(name, sizeof(name), peers[i].name);
-            os_toast("%s is nearby", name);
-        }
-    }
-    free(peers);
-}
-
 void quests_tick(int64_t now)
 {
-    nearby(now);
     if (s_rq.kind != RQ_NONE && now - s_rq.sent > RETRY_MS) {
         if (s_rq.tries < 2 && send_relay(&s_rq)) {
             ESP_LOGD(TAG, "rid %d: retry", s_rq.rid);

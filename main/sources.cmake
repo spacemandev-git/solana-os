@@ -11,6 +11,7 @@ set(SOLANA_OS_SRCS
     apps/registry.c
     apps/wifi/wifi_app.c
     apps/badge/badge_app.c
+    apps/xdex/xdex_app.c apps/trade/trade_app.c apps/quests/quests_app.c
     apps/espnow/espnow_app.c
     apps/skate/skate_app.c
     apps/debug/debug_app.c

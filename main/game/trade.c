@@ -444,10 +444,10 @@ static void on_invite(const os_mesh_peer_t *from, const char *tid)
         }
         return;
     }
+    // os_mesh raises the "wants to trade" toast.
     int i;
     for (i = 0; i < s_ninv && strcmp(s_inv[i].peer, from->id); i++) {
     }
-    bool fresh = i == s_ninv || strcmp(s_inv[i].tid, tid);
     if (i == s_ninv) {
         if (s_ninv == TRADE_INVITES_MAX) {
             s_ninv--;                   // drop the oldest
@@ -463,9 +463,6 @@ static void on_invite(const os_mesh_peer_t *from, const char *tid)
     memmove(&s_inv_at[1], &s_inv_at[0], i * sizeof(s_inv_at[0]));
     s_inv[0] = inv;
     s_inv_at[0] = game_now_ms();
-    if (fresh) {
-        os_toast("%s wants to trade", inv.label);
-    }
 }
 
 static void on_offer(const cJSON *msg)

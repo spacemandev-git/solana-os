@@ -350,8 +350,7 @@ static void on_req(const os_mesh_peer_t *from, const cJSON *msg)
     if (i >= 0 && s_pending[i].accepted) {
         return;                         // a repeat of the one we're finishing
     }
-    bool fresh = i < 0;
-    if (fresh) {
+    if (i < 0) {
         if (s_npending == XDEX_PENDING_MAX) {
             drop_pending(XDEX_PENDING_MAX - 1);     // the oldest
         }
@@ -359,16 +358,12 @@ static void on_req(const os_mesh_peer_t *from, const cJSON *msg)
         s_npending++;
         i = 0;
     }
+    // os_mesh raises the "wants to swap cards" toast.
     xdex_req_t *r = &s_pending[i];
     memset(r, 0, sizeof(*r));
     card_from_json(&r->card, from->id, card);
     strlcpy(r->nonce, nonce, sizeof(r->nonce));
     r->at = game_now_ms();
-    if (fresh) {
-        char who[GAME_CARD_NAME + 8];
-        game_peer_label(r->card.n, r->card.id, who, sizeof(who));
-        os_toast("%s wants to swap cards", who);
-    }
 }
 
 static void on_fin(const os_mesh_peer_t *from, const cJSON *msg)

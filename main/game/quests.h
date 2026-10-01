@@ -6,7 +6,7 @@
 // The service runs the relay client (one request in flight, one retry after
 // 3 s, a ping every 10 s while talking), applies dialog effects (toast, LED,
 // !LAMPs, page, temporary app download into /sdcard/hh/apps/<id>/) and keeps
-// the quest log. It also toasts when a beacon comes into range.
+// the quest log. (os_mesh toasts when a beacon comes into range.)
 // OS task only (see game.h).
 
 #include <stdbool.h>
