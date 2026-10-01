@@ -30,7 +30,7 @@
 #define LH_MESH_PER_S       4
 #define LH_MESH_MAX         200         // bytes of JSON per mesh.send
 #define LH_CALLS_MAX        8           // API requests in flight
-#define LH_JSON_DEPTH       24
+#define LH_JSON_DEPTH       16          // nesting; bounds the decoder's recursion
 #define LH_LED_COUNT        8
 
 typedef enum { LH_LABEL, LH_RECT, LH_BAR, LH_GRADIENT, LH_LIST, LH_KIND_COUNT } lh_kind_t;

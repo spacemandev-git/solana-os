@@ -654,7 +654,7 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
 l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
   CallInfo *ci;
   L->nCcalls += inc;
-  if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS)) {
+  if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS || luai_cstackfull())) {  /* Solana OS */
     checkstackp(L, 0, func);  /* free any use of EXTRA_STACK */
     luaE_checkcstack(L);
   }

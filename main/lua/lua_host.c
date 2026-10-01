@@ -35,6 +35,8 @@
 static const char *TAG = "lua";
 
 #define LH_STACK            (12 * 1024)
+#define LH_STACK_LOW        4096        // left when Lua raises "C stack overflow"
+#define LH_STACK_CRIT       2048        // left when even handling that fails
 #define LH_PRIO             2           // below the mesh task, above idle
 #define LH_HOOK_EVERY       1000        // instructions between budget checks
 #define LH_QUEUE_LEN        16
@@ -53,6 +55,18 @@ static uint32_t s_gen;
 static lua_pkg_t s_next;            // app to start on the next enter (under lh_mx)
 static char s_title[21] = "Lua";
 static bool s_busy;                 // a lua task exists (under lh_mx)
+
+// Native C stack guard (vendor/luaconf.h luai_cstackfull): Lua asks before
+// every new C level. The leaf work under a level (LVGL, printf, JSON, pattern
+// matching) stays within LH_STACK_LOW. 0 off the lua task.
+static uintptr_t s_stack_low, s_stack_crit;
+
+int lh_cstack_check(void)
+{
+    volatile char probe;
+    uintptr_t sp = (uintptr_t)&probe;
+    return !s_stack_low ? 0 : sp < s_stack_crit ? 2 : sp < s_stack_low ? 1 : 0;
+}
 
 int64_t lh_now(void)
 {
@@ -409,6 +423,7 @@ static TickType_t wait_ticks(lh_t *s)
 
 static void task_end(lh_t *s)
 {
+    s_stack_low = s_stack_crit = 0;
     lh_stats = (lh_stats_t){
         .mem_peak = s->mem_peak, .mem_end = s->mem, .steps_peak = s->steps_peak,
         .stack_free = uxTaskGetStackHighWaterMark(NULL), .heap_before = s->heap_before,
@@ -435,6 +450,12 @@ static void task_end(lh_t *s)
 static void lua_task(void *arg)
 {
     lh_t *s = arg;
+    volatile char top;
+    // The stack ends about LH_STACK below this frame (the frames above it put
+    // the real end a few hundred bytes higher; the margins absorb that).
+    uintptr_t bottom = (uintptr_t)&top - LH_STACK;
+    s_stack_low = bottom + LH_STACK_LOW;
+    s_stack_crit = bottom + LH_STACK_CRIT;
     char rel[64], path[160];
     lua_pkg_rel(rel, sizeof(rel), s->pkg.id, "main.lua");
     os_data_path(path, sizeof(path), rel);
