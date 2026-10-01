@@ -4,6 +4,7 @@
 // Output goes to the browser console. Same command names as the badge's
 // console for the parts that make sense in a browser.
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,12 +53,32 @@ static void cmd_wifi(int argc, char **argv)
 
 EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
 {
-    char buf[160];
-    char *argv[8];
+    // Split like the badge's esp_console: spaces separate words, "double
+    // quotes" group them ("wifi connect \"Solana Demo\" pass").
+    static char buf[512];
+    char *argv[16];
     int argc = 0;
     strlcpy(buf, line ? line : "", sizeof(buf));
-    for (char *tok = strtok(buf, " \t"); tok && argc < 8; tok = strtok(NULL, " \t")) {
-        argv[argc++] = tok;
+    for (char *p = buf, *out = buf; *p && argc < 16;) {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        argv[argc++] = out;
+        bool quoted = false;
+        for (; *p && (quoted || (*p != ' ' && *p != '\t')); p++) {
+            if (*p == '"') {
+                quoted = !quoted;
+            } else {
+                *out++ = *p;
+            }
+        }
+        if (*p) {
+            p++;
+        }
+        *out++ = 0;
     }
     if (!argc) {
         return;

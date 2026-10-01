@@ -141,3 +141,8 @@ void os_radio_mac(uint8_t mac[6])
 {
     memcpy(mac, emu_mac(), 6);
 }
+
+void os_radio_stay_awake(bool on)
+{
+    (void)on;               // the emulated radio never naps
+}

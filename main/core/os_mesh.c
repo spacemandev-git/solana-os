@@ -435,7 +435,11 @@ void os_mesh_acquire(void)
         suspend = joined && !(w.state == OS_WIFI_CONNECTED && w.channel == s_channel);
         s_took_wifi = suspend;
     }
+    bool first = s_acquired == 1;
     xSemaphoreGive(s_lock);
+    if (first) {
+        os_radio_stay_awake(true);
+    }
     if (suspend) {
         ESP_LOGI(TAG, "Wi-Fi is off the mesh channel: suspending it while a mesh app runs");
         os_wifi_suspend();
@@ -445,13 +449,17 @@ void os_mesh_acquire(void)
 
 void os_mesh_release(void)
 {
-    bool resume = false;
+    bool resume = false, last = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_acquired > 0 && --s_acquired == 0) {
+        last = true;
         resume = s_took_wifi;
         s_took_wifi = false;
     }
     xSemaphoreGive(s_lock);
+    if (last) {
+        os_radio_stay_awake(false);
+    }
     if (resume) {
         os_wifi_resume();
     }

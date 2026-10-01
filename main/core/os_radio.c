@@ -115,3 +115,11 @@ void os_radio_mac(uint8_t mac[6])
 {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 }
+
+void os_radio_stay_awake(bool on)
+{
+    esp_err_t err = esp_wifi_set_ps(on ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "power save: %s", esp_err_to_name(err));
+    }
+}
