@@ -43,6 +43,7 @@ typedef struct {
 typedef struct {
     char id[LUA_PKG_ID_MAX + 1];
     char version[17];
+    char name[21];          // installed apps only
 } ver_t;
 
 typedef struct {
@@ -145,14 +146,20 @@ static void urlenc(char *out, size_t n, const char *s)
     out[o] = 0;
 }
 
-static const char *installed_version(const char *id)
+static const ver_t *installed(const char *id)
 {
     for (int i = 0; s_installed && i < s_installed_n; i++) {
         if (!strcmp(s_installed[i].id, id)) {
-            return s_installed[i].version;
+            return &s_installed[i];
         }
     }
     return NULL;
+}
+
+static const char *installed_version(const char *id)
+{
+    const ver_t *v = installed(id);
+    return v ? v->version : NULL;
 }
 
 static void price_text(char *out, size_t n, int price, bool owned)
@@ -193,6 +200,7 @@ static void worker(void *arg)
     for (int i = 0; i < n; i++) {
         strlcpy(vers[i].id, pkgs[i].id, sizeof(vers[i].id));
         strlcpy(vers[i].version, pkgs[i].version, sizeof(vers[i].version));
+        strlcpy(vers[i].name, pkgs[i].name, sizeof(vers[i].name));
     }
     free(pkgs);
     xSemaphoreTake(s_mx, portMAX_DELAY);
@@ -224,10 +232,9 @@ static void row(int i, ui_row_t *r, void *ctx)
 {
     char price[24];
     if (s_updates_only) {
-        const ver_t *u = &s_updates[i];
-        snprintf(r->title, sizeof(r->title), "%s", u->id);
-        const char *have = installed_version(u->id);
-        snprintf(r->sub, sizeof(r->sub), "v%s " LV_SYMBOL_RIGHT " v%s", have ? have : "?", u->version);
+        const ver_t *u = &s_updates[i], *have = installed(u->id);
+        strlcpy(r->title, have && have->name[0] ? have->name : u->id, sizeof(r->title));
+        snprintf(r->sub, sizeof(r->sub), "v%s " LV_SYMBOL_RIGHT " v%s", have ? have->version : "?", u->version);
         strlcpy(r->right, "Update", sizeof(r->right));
         r->right_color = COL_GREEN;
         return;
@@ -269,7 +276,11 @@ static void row(int i, ui_row_t *r, void *ctx)
 static void render_head(void)
 {
     char t[40];
-    snprintf(t, sizeof(t), LV_SYMBOL_LEFT " %s " LV_SYMBOL_RIGHT, s_updates_only ? "Updates" : s_cat_names[s_cat]);
+    if (s_updates_only) {
+        strlcpy(t, "Updates", sizeof(t));
+    } else {
+        snprintf(t, sizeof(t), LV_SYMBOL_LEFT " %s " LV_SYMBOL_RIGHT, s_cat_names[s_cat]);
+    }
     lv_label_set_text(s_cat_l, t);
     lv_label_set_text(s_sort_l, s_updates_only ? "" : s_sort_names[s_sort]);
 }
@@ -617,6 +628,7 @@ static void download_cb(int status, const char *body, void *ctx)
         if (i < INSTALLED_MAX && s_installed) {
             strlcpy(s_installed[i].id, pkg.id, sizeof(s_installed[i].id));
             strlcpy(s_installed[i].version, pkg.version, sizeof(s_installed[i].version));
+            strlcpy(s_installed[i].name, pkg.name, sizeof(s_installed[i].name));
             if (i == s_installed_n) {
                 s_installed_n++;
             }
