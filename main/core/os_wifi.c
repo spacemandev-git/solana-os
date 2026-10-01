@@ -6,7 +6,8 @@
 // Venue networks are one SSID on many APs and both bands. A join first scans
 // the mesh channel (or the channel of the row the user picked) for the SSID
 // and pins that AP: on the mesh channel the badge is online and on the mesh
-// at once, with no suspend. Without one it joins the strongest AP anywhere.
+// at once, with no suspend. Without one (or only a very weak one on the mesh
+// channel) it joins the strongest AP anywhere.
 
 #include <string.h>
 #include <stdlib.h>
@@ -25,6 +26,7 @@ static const char *TAG = "os_wifi";
 #define NVS_NS          "wifi"
 #define MAX_RETRIES     4
 #define SCAN_MAX        32
+#define PIN_MIN_RSSI    -80     // a weaker AP on the mesh channel joins slowly and drops: take the strongest
 
 static SemaphoreHandle_t s_lock;
 static os_wifi_state_t s_state = OS_WIFI_IDLE;
@@ -165,6 +167,10 @@ static void join_scan_done_locked(void)
         if (!strcmp((const char *)recs[i].ssid, s_ssid) && (!best || recs[i].rssi > best->rssi)) {
             best = &recs[i];
         }
+    }
+    if (best && best->rssi < PIN_MIN_RSSI && !s_want_ch) {
+        ESP_LOGI(TAG, "'%s' on ch %d is weak (%d dBm): joining the strongest AP", s_ssid, best->primary, best->rssi);
+        best = NULL;
     }
     if (s_enabled && !s_suspended && s_state == OS_WIFI_CONNECTING) {
         join_locked(best);
