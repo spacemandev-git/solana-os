@@ -50,7 +50,7 @@ static const demo_ap_t s_aps[] = {
 static os_wifi_state_t s_state = OS_WIFI_IDLE;
 static char s_ssid[33], s_pass[65], s_ip[16];
 static bool s_save_on_ip, s_suspended, s_enabled;
-static int s_park;
+static int s_park, s_want_ch;
 static const char *s_fail;
 static int64_t s_scan_done_at, s_connect_at;
 static bool s_scanning, s_scan_done;
@@ -90,15 +90,24 @@ static void save_creds(const char *ssid, const char *pass)
     }
 }
 
-static const demo_ap_t *strongest(const char *ssid)
+// As on the badge: the SSID's AP on the wanted channel (the row the user
+// picked, else the mesh channel), else its strongest AP.
+static const demo_ap_t *pick_ap(const char *ssid)
 {
-    const demo_ap_t *best = NULL;
+    const demo_ap_t *best = NULL, *on_ch = NULL;
+    int ch = s_want_ch ? s_want_ch : s_park;
     for (int i = 0; ssid[0] && i < N_APS; i++) {
-        if (!strcmp(s_aps[i].ssid, ssid) && (!best || s_aps[i].rssi > best->rssi)) {
+        if (strcmp(s_aps[i].ssid, ssid)) {
+            continue;
+        }
+        if (!best || s_aps[i].rssi > best->rssi) {
             best = &s_aps[i];
         }
+        if (s_aps[i].channel == ch && (!on_ch || s_aps[i].rssi > on_ch->rssi)) {
+            on_ch = &s_aps[i];
+        }
     }
-    return best;
+    return on_ch ? on_ch : best;
 }
 
 // Not joined, not joining, not lent out: wait on the park channel.
@@ -115,7 +124,7 @@ static void start_connect(void)
     s_ip[0] = 0;
     s_fail = NULL;
     s_ap = NULL;
-    s_connect_at = emu_now_us() + (strongest(s_ssid) ? CONNECT_MS : FAIL_MS) * 1000LL;
+    s_connect_at = emu_now_us() + (pick_ap(s_ssid) ? CONNECT_MS : FAIL_MS) * 1000LL;
 }
 
 // The "driver": finishes scans and connection attempts when they are due.
@@ -128,7 +137,7 @@ static void wifi_task(void *arg)
             s_scan_done = true;
         }
         if (s_state == OS_WIFI_CONNECTING && now >= s_connect_at) {
-            s_ap = strongest(s_ssid);
+            s_ap = pick_ap(s_ssid);
             if (s_ap) {
                 const uint8_t *mac = emu_mac();
                 snprintf(s_ip, sizeof(s_ip), "192.168.77.%d", 20 + mac[5] % 200);
@@ -225,9 +234,15 @@ int os_wifi_scan_results(wifi_ap_record_t *out, int max)
 
 esp_err_t os_wifi_connect(const char *ssid, const char *pass)
 {
+    return os_wifi_connect_ch(ssid, pass, 0);
+}
+
+esp_err_t os_wifi_connect_ch(const char *ssid, const char *pass, int channel)
+{
     if (!ssid || !ssid[0]) {
         return ESP_ERR_INVALID_ARG;
     }
+    s_want_ch = channel;
     char saved[33] = "", saved_pass[65] = "";
     os_wifi_saved_ssid(saved, sizeof(saved));
     os_wifi_saved_pass(saved_pass, sizeof(saved_pass));

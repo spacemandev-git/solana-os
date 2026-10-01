@@ -60,6 +60,7 @@ static const char *TAG = "os_cloud";
 #define WIFI_CHECK_MS   1000
 #define DEFER_S         10              // retry delay when the heap can't hold a request
 #define HOME_WAIT_MS    3000            // owner change: wait this long for the launcher
+#define LINKED_POLL_S   60              // 409 "linked": ask again until the owner releases it
 
 // Task notification bits.
 #define BIT_REFRESH     (1u << 0)       // hello now
@@ -168,9 +169,11 @@ static bool hex_decode(const char *hex, uint8_t *out, size_t n)
 typedef struct {
     int status;                     // HTTP status, 0 = no response
     bool ok, claimed;
+    bool linked;                    // 409: claimed on the server, and we have no valid secret
     bool deferred;                  // not sent: too little heap right now (e.g. a big app is open)
     char id[16], secret[96], claim_url[160], owner[64];
     char key[33], user[9];
+    char message[160];              // linked: the server's text
     int poll, mesh, lamps, level, packs;
     int64_t time;
     const char *error;
@@ -231,6 +234,17 @@ static void parse(const char *body, hello_t *r)
         }
         const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(j, "error"));
         ESP_LOGW(TAG, "hello: HTTP %d %s", r->status, msg ? msg : "");
+        if (r->status == 409 && cJSON_IsTrue(cJSON_GetObjectItem(j, "linked"))) {
+            r->linked = true;
+            r->error = "Linked to an account";
+            size_t k = 0;               // printable ASCII only: the fonts have nothing else
+            for (const char *p = msg ? msg : ""; *p && k + 1 < sizeof(r->message); p++) {
+                if (*p >= 0x20 && *p < 0x7F) {
+                    r->message[k++] = *p;
+                }
+            }
+            r->message[k] = 0;
+        }
         cJSON_Delete(j);
         return;
     }
@@ -407,6 +421,13 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
         s_info.synced_ms = now_ms();
         s_info.state = r->claimed ? OS_CLOUD_CLAIMED : OS_CLOUD_UNCLAIMED;
         s_info.error = NULL;
+    } else if (r->linked) {
+        // Our secret is gone (NVS erased) but someone owns this badge on the
+        // server: nothing to do here until they release it on the web.
+        s_info.error = r->error;
+        strlcpy(s_info.message, r->message[0] ? r->message : "Release it on the web, then restart the badge.",
+                sizeof(s_info.message));
+        s_info.state = OS_CLOUD_LINKED;
     } else {
         s_info.error = r->error;
         // Keep the QR / owner on screen through a blip; the data is still valid.
@@ -414,6 +435,9 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
         if (!good || ++*errors >= ERRORS_TO_SHOW) {
             s_info.state = OS_CLOUD_ERROR;
         }
+    }
+    if (s_info.state != OS_CLOUD_LINKED) {
+        s_info.message[0] = 0;
     }
     os_cloud_state_t now = s_info.state;
     strlcpy(id, s_info.id, sizeof(id));
@@ -428,8 +452,8 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
     unlock();
 
     if (now != prev) {
-        ESP_LOGI(TAG, "%s id=%s %s", now == OS_CLOUD_CLAIMED ? "claimed" : now == OS_CLOUD_UNCLAIMED ? "unclaimed" : "error",
-                 id, now == OS_CLOUD_ERROR ? r->error : "");
+        ESP_LOGI(TAG, "%s id=%s %s", now == OS_CLOUD_CLAIMED ? "claimed" : now == OS_CLOUD_UNCLAIMED ? "unclaimed"
+                 : now == OS_CLOUD_LINKED ? "linked elsewhere" : "error", id, now == OS_CLOUD_ERROR ? r->error : "");
     }
     if (opened) {
         os_launch(&app_badge);
@@ -441,6 +465,10 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
     if (r->ok) {
         s_poll_s = r->poll < 5 ? 5 : r->poll > 3600 ? 3600 : r->poll;
         return s_poll_s;
+    }
+    if (r->linked) {
+        *errors = 0;
+        return LINKED_POLL_S;
     }
     int cap = s_poll_s > BACKOFF_MIN_S ? s_poll_s : s_poll_s ? BACKOFF_MIN_S : BACKOFF_MAX_S;
     int d = *backoff < cap ? *backoff : cap;
@@ -679,11 +707,13 @@ void os_cloud_set_server(const char *url)
     lock();
     bool changed = strcmp(clean, s_info.server) != 0;
     if (changed) {
-        // The ID, secret and mesh key belong to the old server.
+        // The ID, secret, mesh key and owner belong to the old server. The
+        // owner tag stays: a different account there still means new owner.
         strlcpy(s_info.server, clean, sizeof(s_info.server));
-        s_info.id[0] = s_info.claim_url[0] = 0;
+        s_info.id[0] = s_info.claim_url[0] = s_info.owner[0] = s_info.user[0] = 0;
         s_secret[0] = 0;
-        s_info.has_key = false;
+        s_info.has_key = s_info.claimed = false;
+        s_info.lamps = s_info.level = s_info.packs = 0;
         s_info.state = OS_CLOUD_OFFLINE;
         s_info.error = NULL;
         s_next_ms = -1;
@@ -696,6 +726,8 @@ void os_cloud_set_server(const char *url)
         nvs_save("id", "");
         nvs_save("secret", "");
         nvs_save("key", "");
+        nvs_save("owner", "");
+        nvs_save_int("claimed", 0);
         ESP_LOGI(TAG, "server set to '%s'", clean);
     }
     os_cloud_refresh();
