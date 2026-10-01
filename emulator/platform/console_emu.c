@@ -33,7 +33,7 @@ static void cmd_wifi(int argc, char **argv)
 {
     const char *sub = argc > 1 ? argv[1] : "status";
     if (!strcmp(sub, "connect") && argc >= 3) {
-        os_wifi_connect(argv[2], argc > 3 ? argv[3] : "");
+        os_wifi_connect_ch(argv[2], argc > 3 ? argv[3] : "", argc > 4 ? atoi(argv[4]) : 0);
         return;
     }
     if (!strcmp(sub, "forget")) {
@@ -86,7 +86,7 @@ EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
     const char *cmd = argv[0];
     if (!strcmp(cmd, "help")) {
         printf("commands: info, apps, open <id|home|calib>, key <up|down|left|right|select|back|home>...,\n"
-               "          wifi [status|on|off|connect <ssid> [pass]|forget], cloud, server <url|clear>,\n"
+               "          wifi [status|on|off|connect <ssid> [pass [channel]]|forget], cloud, server <url|clear>,\n"
                "          rgb <i|all> <r> <g> <b>, shot, heap\n");
         for (int i = 0; i < os_cmd_count(); i++) {
             printf("          %s\n", os_cmd_get(i)->help);
