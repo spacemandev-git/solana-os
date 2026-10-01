@@ -52,6 +52,7 @@ typedef struct {
     bool i_locked, they_locked;         // valid for the current revisions
     bool can_sign;                      // inviter, both locked: trade_sign() sends our signature
     bool settled, rejected;             // the server's answer, once it came (TRADE_DONE)
+    bool unconfirmed;                   // ended after we signed: it may still settle
     char reason[48];                    // why it was cancelled or rejected
 } trade_view_t;
 
@@ -85,6 +86,8 @@ int trade_count_of(bool page, const char *id);  // copies of id in my offer
 // signature is out the trade can settle, whatever happens next.
 void trade_lock(bool on);
 void trade_sign(void);
+// Send a pending edit now, so the revisions match what the screen shows.
+void trade_flush(void);
 
 // Recorded trades, newest first (malloc'd *out, free it).
 typedef enum { TRADE_REC_PENDING, TRADE_REC_UNCONFIRMED, TRADE_REC_SETTLED, TRADE_REC_REJECTED } trade_rec_status_t;

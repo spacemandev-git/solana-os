@@ -6,12 +6,17 @@
 // ping every 10 s while a conversation is open (the server lapses a session
 // 30 s after the last request, and leaving a talk step unfinished that way
 // loses progress).
+//
+// Anything can claim to be a beacon, so an answer counts only with the
+// server's tag over it, under this badge's mesh key (MESH.md §5): only the
+// server could have made it. Anything else is dropped and we keep waiting.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "esp_log.h"
+#include "esp_random.h"
 #include "core/os.h"
 #include "core/os_api.h"
 #include "core/os_cloud.h"
@@ -22,6 +27,7 @@
 static const char *TAG = "quests";
 
 #define RETRY_MS        3000        // MESH.md: one retry after 3 s
+#define TRIES           2
 #define PING_MS         10000
 #define REQ_MAX         96
 #define APP_MAX         (64 * 1024)
@@ -35,6 +41,9 @@ typedef struct {
     char req[REQ_MAX];
     int64_t sent;
     int tries;
+    char nonce[17];                 // the beacon nonce the request carries
+    char tag[OS_MESH_TAG_LEN + 1];  // our tag over it
+    bool busy;                      // the beacon answered "busy" without a tag
 } relay_t;
 
 static relay_t s_rq;                    // in flight
@@ -58,31 +67,36 @@ static char s_log_error[48];
 // ---------------------------------------------------------------------------
 // Relay client
 
+// The first try signs with the beacon's current nonce. The retry resends the
+// identical frame: the beacon still accepts that nonce (it keeps the previous
+// one for 30 s) and answers a repeat from its cache, tagged over that nonce.
 static bool send_relay(relay_t *r)
 {
     os_mesh_peer_t p;
     if (!os_mesh_peer(r->beacon, &p) || p.kind != OS_PEER_BEACON || !p.nonce[0]) {
         return false;
     }
-    char *tagged = malloc(REQ_MAX + 64);
-    char tag[OS_MESH_TAG_LEN + 1];
-    if (!tagged) {
-        return false;
-    }
-    snprintf(tagged, REQ_MAX + 64, "relay|%s|%s|%s|%d|%s", game_badge_id(), r->beacon, p.nonce, r->rid, r->req);
-    bool ok = os_mesh_sign(tagged, tag);
-    free(tagged);
-    if (!ok) {
-        return false;
+    if (!r->tries) {
+        char *tagged = malloc(REQ_MAX + 64);
+        if (!tagged) {
+            return false;
+        }
+        strlcpy(r->nonce, p.nonce, sizeof(r->nonce));
+        snprintf(tagged, REQ_MAX + 64, "relay|%s|%s|%s|%d|%s", game_badge_id(), r->beacon, r->nonce, r->rid, r->req);
+        bool ok = os_mesh_sign(tagged, r->tag);
+        free(tagged);
+        if (!ok) {
+            return false;
+        }
     }
     cJSON *m = cJSON_CreateObject();
     cJSON_AddNumberToObject(m, "rid", r->rid);
-    cJSON_AddStringToObject(m, "nonce", p.nonce);
+    cJSON_AddStringToObject(m, "nonce", r->nonce);
     cJSON_AddStringToObject(m, "req", r->req);
-    cJSON_AddStringToObject(m, "tag", tag);
+    cJSON_AddStringToObject(m, "tag", r->tag);
     char *json = cJSON_PrintUnformatted(m);
     cJSON_Delete(m);
-    ok = json && os_mesh_send(OS_MESH_RELAY, r->beacon, json) == ESP_OK;
+    bool ok = json && os_mesh_send(OS_MESH_RELAY, r->beacon, json) == ESP_OK;
     cJSON_free(json);
     r->sent = game_now_ms();
     r->tries++;
@@ -99,6 +113,7 @@ static void start(rq_kind_t kind, const char *beacon, const char *req)
     s_rq.rid = ++s_rid;
     strlcpy(s_rq.beacon, beacon, sizeof(s_rq.beacon));
     strlcpy(s_rq.req, req, sizeof(s_rq.req));
+    game_expect_relay(beacon, s_rq.rid);
     if (!send_relay(&s_rq)) {
         s_rq.kind = RQ_NONE;
         failed(kind, "The beacon is out of range");
@@ -280,6 +295,23 @@ static void dl_fail(const char *error)
     ESP_LOGW(TAG, "app %s: %s", s_dl.id, error);
 }
 
+// A quest may hand out (or refresh) a temporary app, but never replace an
+// app the owner installed.
+static bool app_replaceable(const char *id)
+{
+    char rel[64];
+    snprintf(rel, sizeof(rel), "apps/%s/app.json", id);
+    char *m = os_data_read(rel, 4096, NULL);
+    if (!m) {
+        return true;                    // not installed
+    }
+    cJSON *j = cJSON_Parse(m);
+    free(m);
+    bool temp = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "temp"));
+    cJSON_Delete(j);
+    return temp;
+}
+
 static void dl_start(const char *app, const char *beacon)
 {
     if (s_dl.state == QDL_RUNNING && !strcmp(s_dl.id, app)) {
@@ -299,6 +331,10 @@ static void dl_start(const char *app, const char *beacon)
     strlcpy(s_dl_beacon, beacon, sizeof(s_dl_beacon));
     if (!os_data_ready()) {
         dl_fail("insert a microSD card");
+        return;
+    }
+    if (!app_replaceable(app)) {
+        dl_fail("an app with that name is installed");
         return;
     }
     char rel[64];
@@ -340,6 +376,10 @@ static void on_app_chunk(const cJSON *res)
     }
     if (s_dl.off < total) {
         return;                         // pump() asks for the next chunk
+    }
+    if (!app_replaceable(s_dl.id)) {
+        dl_fail("an app with that name is installed");
+        return;
     }
     char dest[128];
     dl_path(dest, sizeof(dest), "main.lua");
@@ -549,19 +589,43 @@ static void failed(rq_kind_t kind, const char *error)
     }
 }
 
+// tag(key, "resp|" + me + "|" + beacon + "|" + nonce + "|" + rid + "|" + ("1|" + res or "0|" + error))
+static bool answer_signed(const relay_t *r, bool ok, const char *payload, const char *tag)
+{
+    size_t cap = strlen(payload) + 64;
+    char *s = malloc(cap);
+    char want[OS_MESH_TAG_LEN + 1];
+    bool good = s && snprintf(s, cap, "resp|%s|%s|%s|%d|%s|%s", game_badge_id(), r->beacon, r->nonce, r->rid,
+                              ok ? "1" : "0", payload) < (int)cap
+             && os_mesh_sign(s, want) && !strcmp(want, tag);
+    free(s);
+    return good;
+}
+
 void quests_on_mesh(const os_mesh_peer_t *from, cJSON *msg)
 {
     if (s_rq.kind == RQ_NONE || strcmp(from->id, s_rq.beacon) || game_jint(msg, "rid", -1) != s_rq.rid) {
         return;
     }
-    relay_t rq = s_rq;
-    s_rq.kind = RQ_NONE;
-    if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "ok"))) {
-        const char *err = game_jstr(msg, "error");
-        failed(rq.kind, err[0] ? err : "The beacon said no");
+    bool ok = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(msg, "ok"));
+    const char *tag = game_jstr(msg, "tag");
+    if (!tag[0]) {
+        // The beacon's own trouble (no server answer): worth a word, not trust.
+        s_rq.busy = s_rq.busy || !ok;
         return;
     }
-    const cJSON *res = cJSON_GetObjectItemCaseSensitive(msg, "res");
+    const char *payload = game_jstr(msg, ok ? "res" : "error");
+    if (!answer_signed(&s_rq, ok, payload, tag)) {
+        ESP_LOGW(TAG, "rid %d: answer from %s without a valid tag, dropped", s_rq.rid, from->id);
+        return;
+    }
+    relay_t rq = s_rq;
+    s_rq.kind = RQ_NONE;
+    if (!ok) {
+        failed(rq.kind, payload[0] ? payload : "The beacon said no");
+        return;
+    }
+    cJSON *res = cJSON_Parse(payload);
     switch (rq.kind) {
     case RQ_DIALOG:
         if (s_dlg) {
@@ -582,6 +646,7 @@ void quests_on_mesh(const os_mesh_peer_t *from, cJSON *msg)
     default:
         break;
     }
+    cJSON_Delete(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -589,12 +654,12 @@ void quests_on_mesh(const os_mesh_peer_t *from, cJSON *msg)
 void quests_tick(int64_t now)
 {
     if (s_rq.kind != RQ_NONE && now - s_rq.sent > RETRY_MS) {
-        if (s_rq.tries < 2 && send_relay(&s_rq)) {
+        if (s_rq.tries < TRIES && send_relay(&s_rq)) {
             ESP_LOGD(TAG, "rid %d: retry", s_rq.rid);
         } else {
             rq_kind_t kind = s_rq.kind;
             s_rq.kind = RQ_NONE;
-            failed(kind, "The beacon didn't answer");
+            failed(kind, s_rq.busy ? "The beacon is busy" : "The beacon didn't answer");
         }
     }
     pump(now);
@@ -674,5 +739,6 @@ static int cmd_quest(int argc, char **argv)
 
 void quests_init(void)
 {
+    s_rid = esp_random() % 100000;      // rids don't repeat across a quick reboot
     os_cmd_register("quest", "quest [status|talk <beacon>|choose <i>|bye|log]", cmd_quest);
 }
