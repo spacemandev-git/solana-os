@@ -106,29 +106,6 @@ static int jint(const cJSON *o, const char *key, int def)
     return cJSON_IsNumber(v) ? v->valueint : def;
 }
 
-// ui_list's sub line is one line of ~42 Semi-Mono characters: cut longer
-// text at a character boundary and end it with "...".
-static void clip(char *out, size_t n, const char *s)
-{
-    enum { CHARS = 40 };
-    size_t i = 0, chars = 0;
-    while (s[i] && chars < CHARS && i + 4 < n) {
-        i++;
-        while ((s[i] & 0xC0) == 0x80) {
-            i++;            // continuation bytes of one UTF-8 character
-        }
-        chars++;
-    }
-    memcpy(out, s, i);
-    out[i] = 0;
-    if (s[i]) {
-        while (i > 0 && out[i - 1] == ' ') {
-            out[--i] = 0;
-        }
-        strlcat(out, "...", n);
-    }
-}
-
 static void urlenc(char *out, size_t n, const char *s)
 {
     static const char hex[] = "0123456789ABCDEF";
@@ -260,7 +237,7 @@ static void row(int i, ui_row_t *r, void *ctx)
     }
     const entry_t *e = &s_entries[i - c];
     snprintf(r->title, sizeof(r->title), "%s  %s", e->symbol, e->name);
-    clip(r->sub, sizeof(r->sub), e->summary);
+    strlcpy(r->sub, e->summary, sizeof(r->sub));
     const char *have = installed_version(e->id);
     if (have) {
         bool update = strcmp(have, e->version) != 0;
