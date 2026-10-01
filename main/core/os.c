@@ -224,6 +224,113 @@ static void toast_create(void)
 }
 
 // ---------------------------------------------------------------------------
+// Confirm dialog (OS task, LVGL locked)
+
+#define CONFIRM_W   280
+
+static lv_obj_t *s_modal;
+static os_confirm_cb_t s_modal_cb;
+static void *s_modal_ctx;
+
+typedef struct {
+    os_confirm_cb_t done;
+    void *ctx;
+    char text[];
+} confirm_req_t;
+
+static void confirm_close(bool yes)
+{
+    if (!s_modal) {
+        return;
+    }
+    lv_obj_delete(s_modal);
+    s_modal = NULL;
+    os_confirm_cb_t cb = s_modal_cb;
+    s_modal_cb = NULL;
+    if (cb) {
+        cb(yes, s_modal_ctx);
+    }
+}
+
+static void confirm_show(const char *text, os_confirm_cb_t done, void *ctx)
+{
+    if (s_modal) {
+        if (done) {
+            done(false, ctx);
+        }
+        return;
+    }
+    s_modal_cb = done;
+    s_modal_ctx = ctx;
+    s_modal = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_modal);
+    lv_obj_set_size(s_modal, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
+    lv_obj_set_style_bg_opa(s_modal, LV_OPA_70, 0);
+    lv_obj_set_style_bg_color(s_modal, lv_color_black(), 0);
+    lv_obj_set_scrollable(s_modal, false);
+
+    lv_obj_t *box = ui_panel(s_modal, 0, 0, CONFIRM_W, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(box, ui_col(COL_PANEL_HI), 0);
+    lv_obj_set_style_border_color(box, ui_col(COL_PURPLE), 0);
+    lv_obj_set_style_pad_all(box, 12, 0);
+    lv_obj_set_style_pad_top(box, 16, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 12, 0);
+    ui_gradient_bar(box, 0, 0, CONFIRM_W - 26, 3);
+    lv_obj_t *msg = ui_label(box, &sol_font_14, COL_TEXT, text);
+    lv_obj_set_width(msg, CONFIRM_W - 26);
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+    ui_label(box, &sol_mono_12, COL_DIM, "SELECT yes     CANCEL no");
+    lv_obj_center(box);
+}
+
+static void confirm_posted(void *arg)
+{
+    confirm_req_t *r = arg;
+    confirm_show(r->text, r->done, r->ctx);
+    free(r);
+}
+
+void os_confirm(const char *text, os_confirm_cb_t done, void *ctx)
+{
+    text = text ? text : "";
+    if (s_task && xTaskGetCurrentTaskHandle() == s_task) {
+        confirm_show(text, done, ctx);
+        return;
+    }
+    confirm_req_t *r = malloc(sizeof(*r) + strlen(text) + 1);
+    if (r) {
+        r->done = done;
+        r->ctx = ctx;
+        strcpy(r->text, text);
+    }
+    if (!r || !os_post(confirm_posted, r)) {
+        free(r);
+        ESP_LOGE(TAG, "confirm dropped: OS queue full");
+    }
+}
+
+bool os_confirm_open(void)
+{
+    return s_modal != NULL;
+}
+
+// The dialog takes SELECT and CANCEL; everything else is swallowed. HOME
+// answers no and goes home.
+static bool confirm_key(os_key_t key, bool repeat)
+{
+    if (!s_modal) {
+        return false;
+    }
+    if (!repeat && (key == OS_KEY_SELECT || key == OS_KEY_BACK || key == OS_KEY_HOME)) {
+        confirm_close(key == OS_KEY_SELECT);
+    }
+    return key != OS_KEY_HOME;
+}
+
+// ---------------------------------------------------------------------------
 // App switching (OS task, LVGL locked)
 
 static void switch_to(const os_app_t *app)
@@ -231,6 +338,7 @@ static void switch_to(const os_app_t *app)
     if (app == s_app) {
         return;
     }
+    confirm_close(false);           // the dialog belongs to the app that is leaving
     if (s_app && s_app->on_exit) {
         s_app->on_exit();
     }
@@ -246,6 +354,9 @@ static void switch_to(const os_app_t *app)
 
 static void dispatch(os_key_t key, bool repeat)
 {
+    if (confirm_key(key, repeat)) {
+        return;
+    }
     if (key == OS_KEY_HOME) {
         if (!repeat) {
             switch_to(&os_launcher);
@@ -370,7 +481,7 @@ static void handle(const os_event_t *ev, os_key_t *held, int64_t *next_repeat, u
             down &= ~bit;
             os_key_t k = os_key_from_button(bit);
             ESP_LOGI(TAG, "button 0x%02lx -> %s", (unsigned long)bit, os_key_name(k));
-            if (s_app->on_button && k != OS_KEY_HOME) {
+            if (s_app->on_button && k != OS_KEY_HOME && !s_modal) {
                 s_app->on_button(bit);
                 continue;
             }

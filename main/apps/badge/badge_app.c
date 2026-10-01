@@ -1,14 +1,21 @@
 // My Badge: this badge's identity on the server (core/os_cloud). While the
 // badge is unclaimed it shows a QR code of the claim link, so the owner can
-// scan it with a phone and link the badge to their account.
+// scan it with a phone and link the badge to their account. Once claimed it
+// shows the owner, !LAMPs, Level, pages and unopened packs.
 //
-// The cloud task does all the talking; this app only renders snapshots of
-// os_cloud_get_info() and rebuilds the view when the state changes.
+// The cloud task does the hello; this app renders snapshots of
+// os_cloud_get_info() (kept in NVS, so the claimed view works offline) and,
+// when online, adds GET /api/device/me (pages, next bounty) and the first
+// unopened pack's name, cached in /sdcard/hh/cache/me.json.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "cJSON.h"
 #include "core/os.h"
+#include "core/os_api.h"
 #include "core/os_cloud.h"
+#include "core/os_data.h"
 #include "core/os_wifi.h"
 #include "core/ui.h"
 
@@ -17,14 +24,28 @@
 #define QR_SIZE     148         // canvas; lv_qrcode centres the code at an integer scale
 #define COL_X       (10 + QR_BOX + 12)
 #define COL_W       (OS_ROOT_W - COL_X - 8)
+#define TILE_W      74
+#define TILE_GAP    6
+#define CACHE       "cache/me.json"
+#define CACHE_MAX   1024
 
-extern const os_app_t app_wifi;
+typedef enum { V_NONE, V_OFFLINE, V_NO_SERVER, V_CONNECTING, V_UNCLAIMED, V_CLAIMED, V_ERROR } view_t;
 
-typedef enum { V_NONE, V_NO_WIFI, V_JOINING, V_NO_SERVER, V_CONNECTING, V_UNCLAIMED, V_CLAIMED, V_ERROR } view_t;
+// GET /api/device/me (+ the first unopened pack), live or from the cache.
+typedef struct {
+    int owned, total;           // pages; total 0 = unknown
+    int next_bounty;            // 0 = unknown
+    char pack[40];              // first unopened pack's name, "" = unknown
+    int64_t at;                 // server time of the data (unix ms), 0 = unknown
+    bool fetching;
+} me_t;
 
-static lv_obj_t *s_root, *s_view, *s_hint, *s_live;
+static lv_obj_t *s_root, *s_view, *s_hint, *s_live, *s_offline;
 static view_t s_shown;
 static os_cloud_info_t *s_last;         // what s_view was built from
+static me_t s_me, s_me_shown;
+static ui_net_t s_net_shown;
+static bool s_asked;                    // fetched /me since the view opened (or since SELECT)
 
 // "https://host:port/path" -> "host:port"
 static void host_of(const char *url, char *out, size_t n)
@@ -47,8 +68,7 @@ static lv_obj_t *label_at(lv_obj_t *parent, const lv_font_t *font, uint32_t colo
 }
 
 // Round badge with an icon (or a spinner), then a centred title and body.
-// Returns the body label so callers can add to it.
-static lv_obj_t *message(const char *symbol, uint32_t color, const char *title, const char *body)
+static void message(const char *symbol, uint32_t color, const char *title, const char *body)
 {
     lv_obj_t *ring;
     if (symbol) {
@@ -79,10 +99,9 @@ static lv_obj_t *message(const char *symbol, uint32_t color, const char *title, 
     lv_label_set_long_mode(b, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_align(b, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 112);
-    return b;
 }
 
-// One-line mono footnote under a message (server, badge ID, retry timer).
+// One-line mono footnote (server, badge ID, retry timer, sync state).
 // row 0 is the bottom line, row 1 the one above it.
 static lv_obj_t *footnote(int row, uint32_t color, const char *text)
 {
@@ -93,6 +112,113 @@ static lv_obj_t *footnote(int row, uint32_t color, const char *text)
     lv_obj_align(l, LV_ALIGN_TOP_MID, 0, CONTENT_H - 24 - row * 16);
     return l;
 }
+
+// ---------------------------------------------------------------------------
+// /api/device/me and its cache
+
+static void cache_load(void)
+{
+    char *raw = os_data_read(CACHE, CACHE_MAX, NULL);
+    cJSON *j = raw ? cJSON_Parse(raw) : NULL;
+    free(raw);
+    if (!j) {
+        return;
+    }
+    const cJSON *pages = cJSON_GetObjectItem(j, "pages");
+    const cJSON *v;
+    if (cJSON_IsNumber(v = cJSON_GetObjectItem(pages, "owned"))) {
+        s_me.owned = v->valueint;
+    }
+    if (cJSON_IsNumber(v = cJSON_GetObjectItem(pages, "total"))) {
+        s_me.total = v->valueint;
+    }
+    if (cJSON_IsNumber(v = cJSON_GetObjectItem(j, "nextBounty"))) {
+        s_me.next_bounty = v->valueint;
+    }
+    if (cJSON_IsNumber(v = cJSON_GetObjectItem(j, "time"))) {
+        s_me.at = (int64_t)v->valuedouble;
+    }
+    const char *pack = cJSON_GetStringValue(cJSON_GetObjectItem(j, "pack"));
+    strlcpy(s_me.pack, pack ? pack : "", sizeof(s_me.pack));
+    cJSON_Delete(j);
+}
+
+static void cache_save(void)
+{
+    char buf[200];
+    snprintf(buf, sizeof(buf), "{\"pages\":{\"owned\":%d,\"total\":%d},\"nextBounty\":%d,\"pack\":\"%s\",\"time\":%lld}",
+             s_me.owned, s_me.total, s_me.next_bounty, s_me.pack, (long long)s_me.at);
+    os_data_write(CACHE, buf, strlen(buf));
+}
+
+// The pack's name goes into JSON and onto the screen: printable ASCII, no quotes.
+static void clean_name(char *out, size_t n, const char *in)
+{
+    size_t j = 0;
+    for (const char *p = in ? in : ""; *p && j + 1 < n; p++) {
+        if (*p >= 0x20 && *p < 0x7F && *p != '"' && *p != '\\') {
+            out[j++] = *p;
+        }
+    }
+    out[j] = 0;
+}
+
+static void on_packs(int status, const char *body, void *ctx)
+{
+    s_me.fetching = false;
+    cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
+    const cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItem(j, "items"), 0);
+    clean_name(s_me.pack, sizeof(s_me.pack), cJSON_GetStringValue(cJSON_GetObjectItem(first, "name")));
+    if (j) {
+        os_cloud_note_packs(cJSON_GetArraySize(cJSON_GetObjectItem(j, "items")));
+    }
+    cJSON_Delete(j);
+    cache_save();
+}
+
+static void on_me(int status, const char *body, void *ctx)
+{
+    s_me.fetching = false;
+    cJSON *j = status == 200 ? cJSON_Parse(body) : NULL;
+    if (!j) {
+        if (status && status != 200) {
+            os_toast("The server answered %d", status);
+        }
+        return;
+    }
+    const cJSON *pages = cJSON_GetObjectItem(j, "pages");
+    const cJSON *lamps = cJSON_GetObjectItem(j, "lamps"), *level = cJSON_GetObjectItem(j, "level");
+    const cJSON *packs = cJSON_GetObjectItem(j, "packs"), *v;
+    s_me.owned = cJSON_IsNumber(v = cJSON_GetObjectItem(pages, "owned")) ? v->valueint : 0;
+    s_me.total = cJSON_IsNumber(v = cJSON_GetObjectItem(pages, "total")) ? v->valueint : 0;
+    s_me.next_bounty = cJSON_IsNumber(v = cJSON_GetObjectItem(j, "nextBounty")) ? v->valueint : 0;
+    s_me.at = cJSON_IsNumber(v = cJSON_GetObjectItem(j, "time")) ? (int64_t)v->valuedouble : os_cloud_time_ms();
+    if (cJSON_IsNumber(lamps) && cJSON_IsNumber(level)) {
+        os_cloud_note_lamps(lamps->valueint, level->valueint);
+    }
+    int n = cJSON_IsNumber(packs) ? packs->valueint : 0;
+    os_cloud_note_packs(n);
+    cJSON_Delete(j);
+    if (n > 0 && os_api_call("GET", "/api/device/packs", NULL, 0, on_packs, &s_me) == ESP_OK) {
+        s_me.fetching = true;
+        return;
+    }
+    if (!n) {
+        s_me.pack[0] = 0;
+    }
+    cache_save();
+}
+
+static void fetch_me(void)
+{
+    if (!s_me.fetching && os_api_call("GET", "/api/device/me", NULL, 0, on_me, &s_me) == ESP_OK) {
+        s_me.fetching = true;
+        s_asked = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Views
 
 static void build_unclaimed(const os_cloud_info_t *in)
 {
@@ -140,21 +266,44 @@ static void build_unclaimed(const os_cloud_info_t *in)
     label_at(s_view, &sol_mono_12, COL_DIM, "Open it on your phone and sign in with your wallet.", COL_X, y + 124, COL_W);
 }
 
+static void tile(int i, const char *value, const char *name, uint32_t color)
+{
+    lv_obj_t *t = ui_panel(s_view, 8 + i * (TILE_W + TILE_GAP), 74, TILE_W, 54);
+    lv_obj_set_style_pad_all(t, 4, 0);
+    lv_obj_t *v = ui_label(t, &sol_font_20, color, value);
+    lv_obj_set_width(v, TILE_W - 10);
+    lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(v, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_t *l = ui_label(t, &sol_mono_12, COL_DIM, name);
+    lv_obj_align(l, LV_ALIGN_BOTTOM_MID, 0, -1);
+}
+
+// "synced 5 min ago  *  host" or the offline state; updated live.
+static void sync_line(char *out, size_t n, const os_cloud_info_t *in)
+{
+    char ago[24], host[64];
+    host_of(in->server, host, sizeof(host));
+    int64_t now = os_cloud_time_ms();
+    if (s_me.fetching) {
+        snprintf(out, n, "syncing...  " LV_SYMBOL_BULLET "  %s", host);
+    } else if (os_api_online()) {
+        if (now && s_me.at) {
+            snprintf(out, n, "synced %s  " LV_SYMBOL_BULLET "  %s", ui_fmt_ago(ago, sizeof(ago), now - s_me.at), host);
+        } else {
+            snprintf(out, n, "online  " LV_SYMBOL_BULLET "  %s", host);
+        }
+    } else if (os_wifi_enabled()) {
+        snprintf(out, n, "connecting...  " LV_SYMBOL_BULLET "  saved data");
+    } else {
+        snprintf(out, n, "Wi-Fi is off  " LV_SYMBOL_BULLET "  saved data");
+    }
+}
+
 static void build_claimed(const os_cloud_info_t *in)
 {
-    lv_obj_t *ring = lv_obj_create(s_view);
-    lv_obj_remove_style_all(ring);
-    lv_obj_set_size(ring, 48, 48);
-    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(ring, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(ring, ui_col(COL_GREEN), 0);
-    lv_obj_t *ok = ui_label(ring, &lv_font_montserrat_20, COL_BG, LV_SYMBOL_OK);
-    lv_obj_center(ok);
-    lv_obj_align(ring, LV_ALIGN_TOP_MID, 0, 16);
-
-    lv_obj_t *lead = ui_label(s_view, &sol_font_14, COL_DIM, "This badge belongs to");
-    lv_obj_align(lead, LV_ALIGN_TOP_MID, 0, 74);
-    lv_obj_t *who = ui_label(s_view, &sol_font_32, COL_TEXT, in->owner);
+    char buf[48], val[24];
+    lv_obj_t *who = ui_label(s_view, &sol_font_32, COL_TEXT, in->owner[0] ? in->owner : "Linked");
     lv_obj_update_layout(who);
     if (lv_obj_get_width(who) > OS_ROOT_W - 24) {
         lv_obj_set_style_text_font(who, &sol_font_20, 0);
@@ -162,15 +311,41 @@ static void build_claimed(const os_cloud_info_t *in)
         lv_label_set_long_mode(who, LV_LABEL_LONG_MODE_DOTS);
         lv_obj_set_style_text_align(who, LV_TEXT_ALIGN_CENTER, 0);
     }
-    lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 94);
-    ui_gradient_bar(s_view, (OS_ROOT_W - 160) / 2, 142, 160, 3);
+    lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_t *id = ui_label(s_view, &sol_mono_12, COL_DIM, "");
+    lv_label_set_text_fmt(id, "BADGE %s  " LV_SYMBOL_BULLET "  Lv %d", in->id, in->level);
+    lv_obj_align(id, LV_ALIGN_TOP_MID, 0, 48);
+    ui_gradient_bar(s_view, (OS_ROOT_W - 160) / 2, 64, 160, 3);
 
-    lv_obj_t *id = ui_label(s_view, &sol_mono_12, COL_TEXT, "");
-    lv_label_set_text_fmt(id, "BADGE %s  " LV_SYMBOL_BULLET "  LINKED", in->id);
-    lv_obj_align(id, LV_ALIGN_TOP_MID, 0, 156);
-    char host[64];
-    host_of(in->server, host, sizeof(host));
-    footnote(0, COL_DIM, host);
+    tile(0, ui_fmt_num(val, sizeof(val), in->lamps), "!LAMPs", COL_LAMPS);
+    snprintf(buf, sizeof(buf), "%d", in->level);
+    tile(1, buf, "Level", COL_TEXT);
+    if (s_me.total) {
+        snprintf(buf, sizeof(buf), "%d/%d", s_me.owned, s_me.total);
+    } else {
+        strlcpy(buf, "-", sizeof(buf));
+    }
+    tile(2, buf, "Pages", COL_TEXT);
+    snprintf(buf, sizeof(buf), "%d", in->packs);
+    tile(3, buf, "Packs", in->packs ? COL_GREEN : COL_TEXT);
+
+    lv_obj_t *action;
+    if (in->packs > 0) {
+        action = ui_panel(s_view, 8, 138, OS_ROOT_W - 16, 30);
+        lv_obj_set_style_border_color(action, ui_col(COL_GREEN), 0);
+        lv_obj_set_style_pad_ver(action, 5, 0);
+        lv_obj_t *l = ui_label(action, &sol_font_14, COL_TEXT, "");
+        lv_label_set_text_fmt(l, "SELECT: open your %s", s_me.pack[0] ? s_me.pack : in->packs > 1 ? "packs" : "pack");
+        lv_obj_center(l);
+    } else if (s_me.next_bounty) {
+        char amount[32];
+        action = ui_label(s_view, &sol_font_14, COL_DIM, "");
+        lv_label_set_text_fmt(action, "Next X Dex bounty: %s", ui_fmt_lamps(amount, sizeof(amount), s_me.next_bounty));
+        lv_obj_align(action, LV_ALIGN_TOP_MID, 0, 144);
+    }
+    char line[112];
+    sync_line(line, sizeof(line), in);
+    s_live = footnote(0, COL_DIM, line);
 }
 
 static view_t view_for(const os_cloud_info_t *in)
@@ -178,25 +353,33 @@ static view_t view_for(const os_cloud_info_t *in)
     if (!in->server[0]) {
         return V_NO_SERVER;
     }
+    if (in->claimed) {
+        return V_CLAIMED;           // works offline: os_cloud keeps the figures in NVS
+    }
     switch (in->state) {
     case OS_CLOUD_UNCLAIMED:  return V_UNCLAIMED;
-    case OS_CLOUD_CLAIMED:    return V_CLAIMED;
     case OS_CLOUD_ERROR:      return V_ERROR;
     case OS_CLOUD_CONNECTING: return V_CONNECTING;
     default:
         break;
     }
-    os_wifi_state_t w = os_wifi_state();
-    if (w == OS_WIFI_CONNECTED) {
-        return V_CONNECTING;    // the cloud task picks the connection up within a second
-    }
-    return w == OS_WIFI_CONNECTING ? V_JOINING : V_NO_WIFI;
+    // The cloud task picks a fresh connection up within a second.
+    return os_wifi_state() == OS_WIFI_CONNECTED ? V_CONNECTING : V_OFFLINE;
 }
 
-// Only the parts that change without a rebuild: the retry countdown.
+// Only the parts that change without a rebuild.
 static void update_live(const os_cloud_info_t *in)
 {
-    if (!s_live || s_shown != V_ERROR) {
+    if (!s_live) {
+        return;
+    }
+    char line[112];
+    if (s_shown == V_CLAIMED) {
+        sync_line(line, sizeof(line), in);
+        lv_label_set_text(s_live, line);
+        return;
+    }
+    if (s_shown != V_ERROR) {
         return;
     }
     char st[20] = "no response";
@@ -212,6 +395,20 @@ static void update_live(const os_cloud_info_t *in)
     }
 }
 
+static const char *claimed_hint(const os_cloud_info_t *in)
+{
+    if (in->packs > 0) {
+        return "SELECT open pack  CANCEL exit";
+    }
+    switch (ui_net_state(false)) {
+    case UI_NET_OK:         return "SELECT refresh  CANCEL exit";
+    case UI_NET_WIFI_OFF:
+    case UI_NET_FAILED:     return "SELECT connect Wi-Fi  CANCEL exit";
+    case UI_NET_NO_NETWORK: return "SELECT open Wi-Fi  CANCEL exit";
+    default:                return "CANCEL exit";
+    }
+}
+
 static void build(const os_cloud_info_t *in, view_t v)
 {
     if (s_view) {
@@ -221,27 +418,21 @@ static void build(const os_cloud_info_t *in, view_t v)
     lv_obj_remove_style_all(s_view);
     lv_obj_set_size(s_view, OS_ROOT_W, CONTENT_H);
     lv_obj_set_scrollable(s_view, false);
-    s_live = NULL;
+    s_live = s_offline = NULL;
     s_shown = v;
     *s_last = *in;
+    s_me_shown = s_me;
+    s_net_shown = ui_net_state(false);
 
     char host[64], line[96];
     host_of(in->server, host, sizeof(host));
     const char *hint = "SELECT refresh  CANCEL exit";
     switch (v) {
-    case V_NO_WIFI:
-        message(LV_SYMBOL_WIFI, COL_ERR, "No Wi-Fi",
-                "My Badge talks to the badge server over the internet. Join a network first.");
-        hint = "SELECT open Wi-Fi  CANCEL exit";
+    case V_OFFLINE:
+        // The shared panel: "Wi-Fi is off. SELECT to connect to <ssid>" and friends.
+        s_offline = ui_offline_create(s_view, 0, CONTENT_H, false);
+        hint = "SELECT connect  CANCEL exit";
         break;
-    case V_JOINING: {
-        os_wifi_info_t w;
-        os_wifi_get_info(&w);
-        snprintf(line, sizeof(line), "Connecting to %s...", w.ssid);
-        message(NULL, COL_AQUA, "Joining Wi-Fi", line);
-        hint = "SELECT open Wi-Fi  CANCEL exit";
-        break;
-    }
     case V_NO_SERVER:
         message(LV_SYMBOL_SETTINGS, COL_YELLOW, "No server set",
                 "This build has no badge server. Set one over USB with the console:");
@@ -269,6 +460,7 @@ static void build(const os_cloud_info_t *in, view_t v)
         break;
     case V_CLAIMED:
         build_claimed(in);
+        hint = claimed_hint(in);
         break;
     default:
         break;
@@ -276,18 +468,36 @@ static void build(const os_cloud_info_t *in, view_t v)
     lv_label_set_text(s_hint, hint);
 }
 
+static bool same_me(const me_t *a, const me_t *b)
+{
+    return a->owned == b->owned && a->total == b->total && a->next_bounty == b->next_bounty && !strcmp(a->pack, b->pack);
+}
+
 static void render(bool force)
 {
-    os_cloud_info_t in;
-    os_cloud_get_info(&in);
-    view_t v = view_for(&in);
-    bool same = !force && v == s_shown && !strcmp(in.id, s_last->id) && !strcmp(in.claim_url, s_last->claim_url)
-             && !strcmp(in.owner, s_last->owner) && in.error == s_last->error && !strcmp(in.server, s_last->server);
-    if (!same) {
-        build(&in, v);
-    } else {
-        update_live(&in);
+    os_cloud_info_t *in = malloc(sizeof(*in));
+    if (!in) {
+        return;
     }
+    os_cloud_get_info(in);
+    view_t v = view_for(in);
+    bool same = !force && v == s_shown && !strcmp(in->id, s_last->id) && !strcmp(in->claim_url, s_last->claim_url)
+             && !strcmp(in->owner, s_last->owner) && in->error == s_last->error && !strcmp(in->server, s_last->server)
+             && in->lamps == s_last->lamps && in->level == s_last->level && in->packs == s_last->packs
+             && same_me(&s_me, &s_me_shown) && (v != V_CLAIMED || ui_net_state(false) == s_net_shown);
+    if (!same) {
+        build(in, v);
+    } else {
+        update_live(in);
+    }
+    if (s_offline) {
+        ui_offline_update(s_offline);
+    }
+    // Claimed and online: fetch the details once per visit.
+    if (v == V_CLAIMED && !s_asked && os_api_online()) {
+        fetch_me();
+    }
+    free(in);
 }
 
 static void enter(lv_obj_t *root)
@@ -295,6 +505,9 @@ static void enter(lv_obj_t *root)
     s_root = root;
     s_view = NULL;
     s_shown = V_NONE;
+    s_asked = false;
+    memset(&s_me, 0, sizeof(s_me));
+    cache_load();
     s_last = lv_malloc_zeroed(sizeof(*s_last));
     s_hint = ui_hint(root, "");
     render(true);
@@ -302,9 +515,11 @@ static void enter(lv_obj_t *root)
 
 static void on_leave(void)
 {
+    os_api_cancel(&s_me);
+    s_me.fetching = false;
     lv_free(s_last);
     s_last = NULL;
-    s_view = s_live = s_hint = NULL;    // deleted with the root
+    s_view = s_live = s_hint = s_offline = NULL;    // deleted with the root
 }
 
 static bool on_key(os_key_t k, bool repeat)
@@ -312,9 +527,33 @@ static bool on_key(os_key_t k, bool repeat)
     if (k != OS_KEY_SELECT) {
         return false;
     }
-    if (s_shown == V_NO_WIFI || s_shown == V_JOINING) {
-        os_launch(&app_wifi);
-    } else if (s_shown != V_NO_SERVER) {
+    if (ui_offline_key(s_offline, k)) {
+        return true;
+    }
+    if (s_shown == V_CLAIMED) {
+        if (s_last->packs > 0) {
+            os_launch_id("guide");
+            return true;
+        }
+        switch (ui_net_state(false)) {
+        case UI_NET_OK:
+            os_cloud_refresh();
+            fetch_me();
+            break;
+        case UI_NET_WIFI_OFF:
+        case UI_NET_FAILED:
+            os_wifi_set_enabled(true);
+            os_toast("Connecting to Wi-Fi...");
+            break;
+        case UI_NET_NO_NETWORK:
+            os_launch_id("wifi");
+            break;
+        default:
+            break;
+        }
+        return true;
+    }
+    if (s_shown != V_NO_SERVER && s_shown != V_OFFLINE) {
         os_cloud_refresh();
         os_toast("Checking with the server...");
     }
