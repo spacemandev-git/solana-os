@@ -28,7 +28,10 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_lvgl_port.h"
+#include "core/os_api.h"
+#include "core/os_cloud.h"
 #include "core/os_data.h"
+#include "core/os_http.h"
 #include "vendor/lualib.h"
 #include "lua_priv.h"
 
@@ -44,6 +47,8 @@ static const char *TAG = "lua";
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
 #define LH_READ_CHUNK       256
+#define LH_PREWARM_MS       4000        // longest wait for the server connection at launch
+#define LH_SERVER_PERMS     (LUA_PERM_LAMPS | LUA_PERM_ITEMS | LUA_PERM_PROFILE | LUA_PERM_QUEST)
 
 SemaphoreHandle_t lh_mx;
 lh_t *lh_cur;
@@ -493,6 +498,30 @@ static void task_end(lh_t *s)
     vTaskDelete(NULL);
 }
 
+// An app that talks to the server: open the server connection before the
+// script allocates, so the TLS handshake (~35 KB, much of it in one block)
+// gets the big free blocks. Later calls reuse the connection.
+static void prewarm(lh_t *s)
+{
+    if (!(s->pkg.perms & LH_SERVER_PERMS) || !os_api_online() || os_http_connected()) {
+        return;
+    }
+    // The prewarm is a hello from the cloud task: wait for it to start and
+    // finish (or for the connection), at most LH_PREWARM_MS.
+    os_api_prewarm();
+    os_cloud_info_t in;
+    bool seen = false;
+    for (int ms = 0; ms < LH_PREWARM_MS && !s->quit && !os_http_connected(); ms += 50) {
+        os_cloud_get_info(&in);
+        if (in.busy) {
+            seen = true;
+        } else if (seen || ms >= 500) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static void lua_task(void *arg)
 {
     lh_t *s = arg;
@@ -503,6 +532,7 @@ static void lua_task(void *arg)
     s_stack_low = bottom + LH_STACK_LOW;
     s_stack_crit = bottom + LH_STACK_CRIT;
     char rel[64], path[160];
+    prewarm(s);
     lua_pkg_rel(rel, sizeof(rel), s->pkg.id, "main.lua");
     os_data_path(path, sizeof(path), rel);
     reader_t *rd = malloc(sizeof(*rd));
@@ -526,6 +556,8 @@ static void lua_task(void *arg)
     ESP_LOGI(TAG, "%s: booted (%u bytes of Lua heap)", s->pkg.id, (unsigned)s->mem);
 
     if (lock(s)) {
+        lv_obj_delete(s->loading);
+        s->loading = NULL;
         if (!s->L) {
             s->failed = true;
             show_error(s, "Out of memory", "Not enough memory to start the app.");
@@ -600,6 +632,8 @@ static void host_enter(lv_obj_t *root)
     s->t0 = lh_now();
     s->area = area;
     s->modal_ref = s->store_ref = LUA_NOREF;
+    s->loading = ui_label(area, &sol_font_14, COL_DIM, "Starting...");
+    lv_obj_center(s->loading);
     s->heap_before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
     xSemaphoreTake(s_done, 0);
     xSemaphoreTake(lh_mx, portMAX_DELAY);
@@ -615,6 +649,8 @@ static void host_enter(lv_obj_t *root)
         s->finished = true;
         xSemaphoreGive(lh_mx);
         s->failed = true;
+        lv_obj_delete(s->loading);
+        s->loading = NULL;
         show_error(s, "Out of memory", "Not enough memory to start the app.");
     }
 }

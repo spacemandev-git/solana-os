@@ -97,7 +97,7 @@ typedef struct lh {
     bool finished, orphan;      // task end handshake (under lh_mx)
 
     // UI
-    lv_obj_t *area, *hint, *modal;
+    lv_obj_t *area, *hint, *modal, *loading;
     ui_kb_t *kb;
     int modal_ref;              // ui.confirm / ui.input callback
     lh_obj_t objs[LH_OBJ_MAX];
