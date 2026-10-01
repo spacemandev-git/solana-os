@@ -1,8 +1,10 @@
 // Emulator counterpart of core/os_wifi.c: the same os_wifi.h service over a
 // simulated radio. Scans return a fixed set of obviously fake demo networks,
 // joining any of them succeeds and hands out a fake private IP. Credentials
-// use the badge's NVS keys ("wifi/ssid|pass"), saved only once "connected",
-// so the reconnect-on-boot path behaves the same.
+// use the badge's NVS keys ("wifi/ssid|pass"), saved only once "connected".
+// Like the badge, Wi-Fi is off at boot, and the emulated radio
+// (esp_wifi_emu.c, which os_radio_emu.c sends on) sits on the access point's
+// channel while joined and on the park channel otherwise.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +13,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_wifi.h"
 #include "nvs.h"
 #include "core/os_wifi.h"
 #include "emu.h"
@@ -46,7 +49,8 @@ static const demo_ap_t s_aps[] = {
 
 static os_wifi_state_t s_state = OS_WIFI_IDLE;
 static char s_ssid[33], s_pass[65], s_ip[16];
-static bool s_save_on_ip, s_suspended;
+static bool s_save_on_ip, s_suspended, s_enabled;
+static int s_park;
 static const char *s_fail;
 static int64_t s_scan_done_at, s_connect_at;
 static bool s_scanning, s_scan_done;
@@ -97,6 +101,14 @@ static const demo_ap_t *strongest(const char *ssid)
     return best;
 }
 
+// Not joined, not joining, not lent out: wait on the park channel.
+static void park(void)
+{
+    if (s_park && !s_suspended && s_state != OS_WIFI_CONNECTING && s_state != OS_WIFI_CONNECTED) {
+        esp_wifi_set_channel(s_park, WIFI_SECOND_CHAN_NONE);
+    }
+}
+
 static void start_connect(void)
 {
     s_state = OS_WIFI_CONNECTING;
@@ -121,6 +133,7 @@ static void wifi_task(void *arg)
                 const uint8_t *mac = emu_mac();
                 snprintf(s_ip, sizeof(s_ip), "192.168.77.%d", 20 + mac[5] % 200);
                 s_state = OS_WIFI_CONNECTED;
+                esp_wifi_set_channel(s_ap->channel, WIFI_SECOND_CHAN_NONE);
                 ESP_LOGI(TAG, "connected to '%s', ip %s (simulated)", s_ssid, s_ip);
                 if (s_save_on_ip) {
                     save_creds(s_ssid, s_pass);
@@ -131,6 +144,7 @@ static void wifi_task(void *arg)
                 s_state = OS_WIFI_FAILED;
                 s_save_on_ip = false;
                 ESP_LOGW(TAG, "giving up on '%s': %s", s_ssid, s_fail);
+                park();
             }
         }
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -141,12 +155,9 @@ esp_err_t os_wifi_init(void)
 {
     if (os_wifi_saved_ssid(s_ssid, sizeof(s_ssid))) {
         os_wifi_saved_pass(s_pass, sizeof(s_pass));
-        ESP_LOGI(TAG, "saved network '%s'", s_ssid);
+        ESP_LOGI(TAG, "saved network '%s' (Wi-Fi stays off until turned on)", s_ssid);
     }
     xTaskCreate(wifi_task, "wifi", 3072, NULL, 23, NULL);
-    if (s_ssid[0]) {
-        start_connect();
-    }
     return ESP_OK;
 }
 
@@ -162,6 +173,7 @@ void os_wifi_get_info(os_wifi_info_t *out)
     strlcpy(out->ssid, s_ssid, sizeof(out->ssid));
     strlcpy(out->ip, s_ip, sizeof(out->ip));
     out->fail_reason = s_fail;
+    out->enabled = s_enabled;
     if (s_state == OS_WIFI_CONNECTED && s_ap) {
         out->rssi = s_ap->rssi + (int)(esp_random() % 5) - 2;
         out->channel = s_ap->channel;
@@ -216,10 +228,14 @@ esp_err_t os_wifi_connect(const char *ssid, const char *pass)
     if (!ssid || !ssid[0]) {
         return ESP_ERR_INVALID_ARG;
     }
+    char saved[33] = "", saved_pass[65] = "";
+    os_wifi_saved_ssid(saved, sizeof(saved));
+    os_wifi_saved_pass(saved_pass, sizeof(saved_pass));
     strlcpy(s_ssid, ssid, sizeof(s_ssid));
     strlcpy(s_pass, pass ? pass : "", sizeof(s_pass));
-    s_save_on_ip = true;
+    s_save_on_ip = strcmp(saved, s_ssid) || strcmp(saved_pass, s_pass);
     s_suspended = false;
+    s_enabled = true;
     start_connect();
     return ESP_OK;
 }
@@ -235,7 +251,9 @@ void os_wifi_forget(void)
     s_ssid[0] = s_pass[0] = s_ip[0] = 0;
     s_state = OS_WIFI_IDLE;
     s_save_on_ip = false;
+    s_enabled = false;
     s_ap = NULL;
+    park();
 }
 
 void os_wifi_suspend(void)
@@ -250,24 +268,44 @@ void os_wifi_resume(void)
 {
     s_suspended = false;
     s_state = OS_WIFI_IDLE;
-    if (s_ssid[0]) {
+    if (s_enabled && s_ssid[0]) {
         start_connect();
+    } else {
+        park();
     }
 }
 
-// STUB for the HH GtS contract; firmware agent "fw-core" makes Wi-Fi off at boot.
 void os_wifi_set_enabled(bool on)
 {
-    char ssid[33], pass[65];
-    if (on && os_wifi_saved_ssid(ssid, sizeof(ssid))) {
-        if (!os_wifi_saved_pass(pass, sizeof(pass))) {
-            pass[0] = 0;
+    if (on) {
+        char ssid[33], pass[65] = "";
+        if (os_wifi_saved_ssid(ssid, sizeof(ssid))) {
+            os_wifi_saved_pass(pass, sizeof(pass));
+            os_wifi_connect(ssid, pass);
         }
-        os_wifi_connect(ssid, pass);
+        return;
     }
+    if (s_enabled) {
+        ESP_LOGI(TAG, "wifi off");
+    }
+    s_enabled = false;
+    s_save_on_ip = false;
+    if (!s_suspended) {
+        s_state = OS_WIFI_IDLE;
+        s_ip[0] = 0;
+        s_fail = NULL;
+        s_ap = NULL;
+    }
+    park();
 }
 
 bool os_wifi_enabled(void)
 {
-    return os_wifi_state() == OS_WIFI_CONNECTED || os_wifi_state() == OS_WIFI_CONNECTING;
+    return s_enabled;
+}
+
+void os_wifi_set_park_channel(int channel)
+{
+    s_park = channel;
+    park();
 }

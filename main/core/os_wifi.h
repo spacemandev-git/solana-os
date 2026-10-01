@@ -1,8 +1,10 @@
 #pragma once
 
-// System Wi-Fi service. Owns the driver (STA, dual-band), reconnects to the
-// saved network, and lets radio-hungry apps (ESP-NOW sniffer) borrow the
-// radio with suspend/resume.
+// System Wi-Fi service. Owns the driver (STA, dual-band), joins the saved
+// network when the user turns Wi-Fi on, and lets radio-hungry apps (ESP-NOW
+// sniffer, mesh apps) borrow the radio with suspend/resume. While no network
+// is joined the radio waits on the park channel (the mesh channel), so
+// ESP-NOW keeps working with Wi-Fi "off".
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -10,7 +12,7 @@
 #include "esp_wifi_types.h"
 
 typedef enum {
-    OS_WIFI_IDLE,           // no saved network / disconnected
+    OS_WIFI_IDLE,           // off, no saved network, or disconnected
     OS_WIFI_CONNECTING,
     OS_WIFI_CONNECTED,
     OS_WIFI_FAILED,         // gave up; see os_wifi_fail_reason()
@@ -24,6 +26,7 @@ typedef struct {
     int rssi;
     int channel;
     const char *fail_reason;
+    bool enabled;           // os_wifi_enabled()
 } os_wifi_info_t;
 
 esp_err_t os_wifi_init(void);
@@ -40,13 +43,20 @@ int os_wifi_scan_results(wifi_ap_record_t *out, int max);
 
 // Wi-Fi is off at every boot (docs/HHGTS.md): the radio runs (ESP-NOW needs
 // it) but no network is joined until the user, or a Lua app with the "wifi"
-// permission, turns it on. On = join the saved network; off = leave it.
+// permission, turns it on. On = join the saved network (no-op without one);
+// off = leave it. Enabled stays true through retries and failures until it is
+// turned off, the network is forgotten, or the badge reboots.
 void os_wifi_set_enabled(bool on);
 bool os_wifi_enabled(void);
 
-// Credentials are saved to NVS once the connection gets an IP.
+// Join a network (turns Wi-Fi on). Credentials are saved to NVS once the
+// connection gets an IP.
 esp_err_t os_wifi_connect(const char *ssid, const char *pass);
-void os_wifi_forget(void);
+void os_wifi_forget(void);              // also turns Wi-Fi off
+
+// Channel the radio waits on while no network is joined (os_mesh sets the
+// mesh channel). 0 = leave the radio where it is.
+void os_wifi_set_park_channel(int channel);
 
 void os_wifi_suspend(void);
 void os_wifi_resume(void);

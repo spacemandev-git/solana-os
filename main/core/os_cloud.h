@@ -28,12 +28,15 @@ typedef struct {
     int retry_s;            // seconds until the next hello, -1 = not scheduled
     bool busy;              // a hello is in flight (any state)
     // Owner's game state from the last hello (server/API.md), valid when claimed.
+    // Kept in NVS, so it is there offline (Wi-Fi is off at every boot).
     char user[9];           // owner tag; a change wipes /sdcard/hh (new owner)
     int lamps;              // !LAMPs balance
     int level;              // X Dex Level
     int packs;              // unopened packs
     bool has_key;           // mesh key stored
     int mesh_channel;       // from hello; default CONFIG_SOLANA_OS_MESH_CHANNEL
+    bool claimed;           // linked to an owner (as of the last hello, possibly an earlier boot)
+    int64_t synced_ms;      // esp_timer ms of the last good hello this boot, 0 = none yet
 } os_cloud_info_t;
 
 void os_cloud_init(void);                   // after os_wifi_init()
@@ -46,3 +49,8 @@ bool os_cloud_bearer(char *out, size_t n);  // badge secret; false if none
 bool os_cloud_mesh_key(uint8_t out[16]);    // false if none
 int64_t os_cloud_time_ms(void);             // server clock estimate (unix ms), 0 = never synced
 void os_cloud_note_lamps(int lamps, int level);  // newer figures from another API answer
+void os_cloud_note_packs(int packs);        // e.g. after opening or buying a pack
+
+// Factory reset (docs/HHGTS.md): if online, POST /api/device/reset; then wipe
+// /sdcard/hh, erase NVS and reboot. Runs on the cloud task; returns at once.
+void os_cloud_factory_reset(void);

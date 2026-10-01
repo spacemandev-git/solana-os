@@ -24,5 +24,6 @@ set(SOLANA_OS_DEVICE_SRCS
     app_main.c
     core/os_wifi.c
     core/os_http.c
+    core/os_radio.c
     core/console.c
 )

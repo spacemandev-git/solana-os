@@ -224,15 +224,18 @@ static int cmd_wifi(int argc, char **argv)
     } else if (!strcmp(sub, "forget")) {
         os_wifi_forget();
         return 0;
+    } else if (!strcmp(sub, "on") || !strcmp(sub, "off")) {
+        os_wifi_set_enabled(!strcmp(sub, "on"));
+        return 0;
     } else if (strcmp(sub, "status")) {
-        printf("usage: wifi [status|connect <ssid> [pass]|forget]\n");
+        printf("usage: wifi [status|on|off|connect <ssid> [pass]|forget]\n");
         return 1;
     }
     static const char *names[] = {"idle", "connecting", "connected", "failed", "suspended"};
     os_wifi_info_t in;
     os_wifi_get_info(&in);
-    printf("wifi: %s  ssid='%s' ip=%s rssi=%d ch=%d %s\n", names[in.state], in.ssid, in.ip, in.rssi,
-           in.channel, in.fail_reason ? in.fail_reason : "");
+    printf("wifi: %s (%s)  ssid='%s' ip=%s rssi=%d ch=%d %s\n", names[in.state], in.enabled ? "on" : "off", in.ssid,
+           in.ip, in.rssi, in.channel, in.fail_reason ? in.fail_reason : "");
     return 0;
 }
 
@@ -309,7 +312,7 @@ void console_start(void)
         { .command = "apps", .help = "List installed apps", .func = cmd_apps },
         { .command = "open", .help = "open <app id|home> - launch an app", .func = cmd_open },
         { .command = "key", .help = "key <up|down|left|right|select|back|home>... - press keys", .func = cmd_key },
-        { .command = "wifi", .help = "wifi [status|connect <ssid> [pass]|forget]", .func = cmd_wifi },
+        { .command = "wifi", .help = "wifi [status|on|off|connect <ssid> [pass]|forget]", .func = cmd_wifi },
         { .command = "server", .help = "server [url|clear] - show or set the badge server", .func = cmd_server },
         { .command = "cloud", .help = "Badge server link: state, badge ID, owner, claim URL", .func = cmd_cloud },
         { .command = "shot", .help = "Dump a screenshot (decode with tools/badge.py)", .func = cmd_shot },

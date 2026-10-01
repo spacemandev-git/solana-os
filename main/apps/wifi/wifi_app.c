@@ -1,6 +1,7 @@
-// Wi-Fi: scan both bands, pick a network, type the password on the d-pad
-// keyboard, connect. The system service (os_wifi) saves it and reconnects on
-// boot.
+// Wi-Fi: Wi-Fi is off at every boot (docs/HHGTS.md). The saved network is
+// the first row: SELECT turns Wi-Fi on (joins it) or off. Below it, a scan of
+// both bands: pick a network, type the password on the d-pad keyboard,
+// connect. The system service (os_wifi) saves it once it gets an IP.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,7 @@ typedef struct {
 
 static net_t *s_nets;
 static int s_count;
+static bool s_saved_row;        // row 0 is the saved network
 static bool s_scanning;
 static int64_t s_retry_scan_at;
 static lv_obj_t *s_root, *s_status, *s_detail;
@@ -60,9 +62,40 @@ static uint32_t rssi_color(int rssi)
     return rssi >= -60 ? COL_GREEN : rssi >= -75 ? COL_YELLOW : COL_ORANGE;
 }
 
+static void saved_row(ui_row_t *r)
+{
+    os_wifi_info_t w;
+    os_wifi_get_info(&w);
+    char saved[33] = "";
+    os_wifi_saved_ssid(saved, sizeof(saved));
+    strlcpy(r->title, saved, sizeof(r->title));
+    bool on = w.enabled && !strcmp(w.ssid, saved);
+    switch (on ? w.state : OS_WIFI_IDLE) {
+    case OS_WIFI_CONNECTED:
+        snprintf(r->sub, sizeof(r->sub), "Connected  ch %d  SELECT disconnect", w.channel);
+        r->title_color = COL_GREEN;
+        break;
+    case OS_WIFI_CONNECTING:
+        strlcpy(r->sub, "Connecting...  SELECT stop", sizeof(r->sub));
+        break;
+    case OS_WIFI_FAILED:
+        snprintf(r->sub, sizeof(r->sub), "%s  SELECT retry", w.fail_reason ? w.fail_reason : "Failed");
+        break;
+    default:
+        strlcpy(r->sub, "Saved network  SELECT connect", sizeof(r->sub));
+        break;
+    }
+    strlcpy(r->right, on ? "ON" : "OFF", sizeof(r->right));
+    r->right_color = on ? COL_GREEN : COL_DIM;
+}
+
 static void row(int i, ui_row_t *r, void *ctx)
 {
-    const net_t *n = &s_nets[i];
+    if (s_saved_row && i == 0) {
+        saved_row(r);
+        return;
+    }
+    const net_t *n = &s_nets[i - s_saved_row];
     os_wifi_info_t w;
     os_wifi_get_info(&w);
     char saved[33] = "";
@@ -103,14 +136,22 @@ static void render_status(void)
         c = COL_ERR;
         break;
     default:
-        lv_label_set_text(s_status, LV_SYMBOL_CLOSE "  Not connected");
-        lv_label_set_text(s_detail, "Pick a network below");
+        lv_label_set_text(s_status, LV_SYMBOL_CLOSE "  Wi-Fi is off");
+        lv_label_set_text(s_detail, s_saved_row ? "SELECT the saved network to connect" : "Pick a network below");
         break;
     }
     lv_obj_set_style_text_color(s_status, ui_col(c), 0);
     if (s_scanning) {
         lv_label_set_text(s_detail, "Scanning 2.4 + 5 GHz...");
     }
+}
+
+// Row count: the saved network (if any) plus the scan.
+static void update_rows(void)
+{
+    char saved[33];
+    s_saved_row = os_wifi_saved_ssid(saved, sizeof(saved));
+    ui_list_set_count(s_list, s_saved_row + s_count);
 }
 
 static void start_scan(void)
@@ -155,7 +196,7 @@ static void collect_results(void)
     }
     free(recs);
     ui_list_set_empty(s_list, "No networks found.\nPress RIGHT to scan again.");
-    ui_list_set_count(s_list, s_count);
+    update_rows();
 }
 
 static void enter(lv_obj_t *root)
@@ -173,6 +214,7 @@ static void enter(lv_obj_t *root)
     lv_obj_set_pos(s_detail, 0, 18);
     s_list = ui_list_create(root, 50, OS_ROOT_H - 50 - UI_HINT_H, row, NULL);
     ui_hint(root, LV_SYMBOL_UP LV_SYMBOL_DOWN " pick  SELECT join  " LV_SYMBOL_RIGHT " rescan  " LV_SYMBOL_LEFT " forget");
+    update_rows();
     start_scan();
 }
 
@@ -213,6 +255,23 @@ static void join(const net_t *n)
     render_status();
 }
 
+static void toggle_saved(void)
+{
+    char saved[33];
+    if (!os_wifi_saved_ssid(saved, sizeof(saved))) {
+        return;
+    }
+    if (os_wifi_enabled()) {
+        os_wifi_set_enabled(false);
+        os_toast("Wi-Fi off");
+    } else {
+        os_wifi_set_enabled(true);
+        os_toast("Connecting to %s", saved);
+    }
+    ui_list_refresh(s_list);
+    render_status();
+}
+
 static bool on_key(os_key_t k, bool repeat)
 {
     if (s_kb) {
@@ -243,8 +302,10 @@ static bool on_key(os_key_t k, bool repeat)
     switch (k) {
     case OS_KEY_SELECT: {
         int i = ui_list_selected(s_list);
-        if (i >= 0) {
-            join(&s_nets[i]);
+        if (s_saved_row && i == 0) {
+            toggle_saved();
+        } else if (i >= 0) {
+            join(&s_nets[i - s_saved_row]);
         }
         return true;
     }
@@ -258,7 +319,7 @@ static bool on_key(os_key_t k, bool repeat)
         if (!repeat && os_wifi_saved_ssid(saved, sizeof(saved))) {
             os_wifi_forget();
             os_toast("Forgot %s", saved);
-            ui_list_refresh(s_list);
+            update_rows();
             render_status();
         }
         return true;
@@ -280,7 +341,7 @@ static void on_tick(void)
     }
     if (!s_kb && ++n % 5 == 0) {
         render_status();
-        ui_list_refresh(s_list);
+        update_rows();          // the saved network appears once a join gets an IP
     }
 }
 

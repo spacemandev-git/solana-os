@@ -135,8 +135,18 @@ const char *esp_err_to_name(esp_err_t code)
 // ---------------------------------------------------------------------------
 // Identity: one random 48-bit value in localStorage.
 
+// Storage keys: "solana-os-emu:<name>". /emulator?badge=2 namespaces them
+// ("solana-os-emu:2:<name>"), so a second tab of the same origin is a second
+// badge with its own identity and NVS (two-tab mesh tests).
+EM_JS(void, emu_js_prefix, (void), {
+    if (Module.emuPrefix) return;
+    let tag = "";
+    try { tag = (new URLSearchParams(location.search).get("badge") || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 8); } catch (e) {}
+    Module.emuPrefix = "solana-os-emu:" + (tag ? tag + ":" : "");
+});
+
 EM_JS(void, emu_js_identity, (uint8_t *out), {
-    const KEY = 'solana-os-emu:id';
+    const KEY = Module.emuPrefix + "id";
     let id = null;
     try { id = localStorage.getItem(KEY); } catch (e) {}
     if (!id || !/^[0-9a-f]{12}$/.test(id)) {
@@ -155,6 +165,7 @@ static bool s_have_mac;
 const uint8_t *emu_mac(void)
 {
     if (!s_have_mac) {
+        emu_js_prefix();
         emu_js_identity(s_mac);
         s_mac[0] = (s_mac[0] & 0xFC) | 0x02;    // unicast, locally administered: never a real vendor MAC
         s_have_mac = true;
@@ -455,17 +466,18 @@ int mbedtls_base64_decode(unsigned char *dst, size_t dlen, size_t *olen, const u
 }
 
 // ---------------------------------------------------------------------------
-// NVS: namespaces of typed values in localStorage ("solana-os-emu:nvs").
+// NVS: namespaces of typed values in localStorage ("solana-os-emu:nvs", see
+// emu_js_prefix).
 
 EM_JS(void, nvs_js_load, (void), {
     if (Module.nvs) return;
     Module.nvs = {};
     try {
-        const raw = localStorage.getItem('solana-os-emu:nvs');
+        const raw = localStorage.getItem(Module.emuPrefix + "nvs");
         if (raw) Module.nvs = JSON.parse(raw) || {};
     } catch (e) {}
     Module.nvsSave = () => {
-        try { localStorage.setItem('solana-os-emu:nvs', JSON.stringify(Module.nvs)); } catch (e) {}
+        try { localStorage.setItem(Module.emuPrefix + "nvs", JSON.stringify(Module.nvs)); } catch (e) {}
     };
 });
 
@@ -518,6 +530,7 @@ static bool s_nvs_ready;
 
 esp_err_t nvs_flash_init(void)
 {
+    emu_js_prefix();
     nvs_js_load();
     s_nvs_ready = true;
     return ESP_OK;
@@ -525,6 +538,7 @@ esp_err_t nvs_flash_init(void)
 
 esp_err_t nvs_flash_erase(void)
 {
+    emu_js_prefix();
     nvs_js_load();
     nvs_js_erase_everything();
     return ESP_OK;

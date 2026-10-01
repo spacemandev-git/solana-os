@@ -1,5 +1,7 @@
-// System Wi-Fi service: STA on both bands, saved network in NVS, auto
-// reconnect, async scans, and suspend/resume for apps that need the radio.
+// System Wi-Fi service: STA on both bands, saved network in NVS, joined only
+// while the user has Wi-Fi on (off at every boot), auto reconnect, async
+// scans, suspend/resume for apps that need the radio, and the park channel
+// the radio returns to whenever no network is joined (ESP-NOW listens there).
 
 #include <string.h>
 #include <stdlib.h>
@@ -22,8 +24,8 @@ static const char *TAG = "os_wifi";
 static SemaphoreHandle_t s_lock;
 static os_wifi_state_t s_state = OS_WIFI_IDLE;
 static char s_ssid[33], s_pass[65], s_ip[16];
-static bool s_save_on_ip, s_suspended, s_started;
-static int s_retries;
+static bool s_save_on_ip, s_suspended, s_started, s_enabled, s_scanning;
+static int s_retries, s_park;
 static const char *s_fail;
 static volatile bool s_scan_done;
 
@@ -102,19 +104,40 @@ static void start_connect_locked(void)
     esp_wifi_connect();
 }
 
+// Not joined, not joining, not scanning and not lent out: tune the radio to
+// the park channel. The driver refuses channel changes in the other states.
+static void park_locked(void)
+{
+    if (!s_started || !s_park || s_suspended || s_scanning || s_state == OS_WIFI_CONNECTING ||
+            s_state == OS_WIFI_CONNECTED) {
+        return;
+    }
+    uint8_t ch = 0;
+    wifi_second_chan_t second;
+    if (esp_wifi_get_channel(&ch, &second) == ESP_OK && ch == s_park) {
+        return;
+    }
+    esp_err_t err = esp_wifi_set_channel(s_park, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "park on ch %d: %s", s_park, esp_err_to_name(err));
+    }
+}
+
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     LOCK();
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         s_started = true;
-        if (s_ssid[0] && !s_suspended) {
-            start_connect_locked();
-        }
+        park_locked();      // Wi-Fi is off at boot: nothing to join yet
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *d = data;
         s_ip[0] = 0;
-        if (s_suspended || !s_ssid[0]) {
-            // Intentional: radio lent out or network forgotten.
+        if (s_suspended || !s_enabled || !s_ssid[0]) {
+            // Intentional: radio lent out, Wi-Fi turned off or network forgotten.
+            if (!s_suspended) {
+                s_state = OS_WIFI_IDLE;
+                park_locked();
+            }
         } else if (s_retries++ < MAX_RETRIES) {
             ESP_LOGW(TAG, "disconnected (reason %d), retry %d", d->reason, s_retries);
             s_state = OS_WIFI_CONNECTING;
@@ -124,9 +147,12 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             s_state = OS_WIFI_FAILED;
             s_save_on_ip = false;
             ESP_LOGW(TAG, "giving up on '%s': %s (reason %d)", s_ssid, s_fail, d->reason);
+            park_locked();
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
         s_scan_done = true;
+        s_scanning = false;
+        park_locked();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
         esp_ip4addr_ntoa(&e->ip_info.ip, s_ip, sizeof(s_ip));
@@ -158,7 +184,7 @@ esp_err_t os_wifi_init(void)
 
     if (os_wifi_saved_ssid(s_ssid, sizeof(s_ssid))) {
         os_wifi_saved_pass(s_pass, sizeof(s_pass));
-        ESP_LOGI(TAG, "saved network '%s'", s_ssid);
+        ESP_LOGI(TAG, "saved network '%s' (Wi-Fi stays off until turned on)", s_ssid);
     }
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
     if (esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO) != ESP_OK) {
@@ -180,6 +206,7 @@ void os_wifi_get_info(os_wifi_info_t *out)
     strlcpy(out->ssid, s_ssid, sizeof(out->ssid));
     strlcpy(out->ip, s_ip, sizeof(out->ip));
     out->fail_reason = s_fail;
+    out->enabled = s_enabled;
     UNLOCK();
     wifi_ap_record_t ap;
     if (out->state == OS_WIFI_CONNECTED && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
@@ -194,9 +221,11 @@ esp_err_t os_wifi_scan_start(void)
         return ESP_ERR_INVALID_STATE;
     }
     s_scan_done = false;
+    s_scanning = true;
     wifi_scan_config_t cfg = { .show_hidden = true };
     esp_err_t err = esp_wifi_scan_start(&cfg, false);
     if (err != ESP_OK) {
+        s_scanning = false;
         ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
     }
     return err;
@@ -232,9 +261,13 @@ esp_err_t os_wifi_connect(const char *ssid, const char *pass)
     os_wifi_saved_ssid(saved, sizeof(saved));
     strlcpy(s_ssid, ssid, sizeof(s_ssid));
     strlcpy(s_pass, pass ? pass : "", sizeof(s_pass));
-    s_save_on_ip = true;
+    // Rejoining the saved network with its stored password needs no save.
+    char saved_pass[65] = "";
+    s_save_on_ip = strcmp(saved, s_ssid) || !os_wifi_saved_pass(saved_pass, sizeof(saved_pass)) ||
+                   strcmp(saved_pass, s_pass);
     s_retries = 0;
     s_suspended = false;
+    s_enabled = true;
     esp_wifi_disconnect();
     if (s_started) {
         start_connect_locked();
@@ -255,8 +288,12 @@ void os_wifi_forget(void)
     s_ssid[0] = s_pass[0] = s_ip[0] = 0;
     s_state = OS_WIFI_IDLE;
     s_save_on_ip = false;
+    s_enabled = false;
     UNLOCK();
     esp_wifi_disconnect();
+    LOCK();
+    park_locked();
+    UNLOCK();
 }
 
 void os_wifi_suspend(void)
@@ -265,6 +302,7 @@ void os_wifi_suspend(void)
     s_suspended = true;
     s_state = OS_WIFI_SUSPENDED;
     s_ip[0] = 0;
+    s_scanning = false;
     UNLOCK();
     esp_wifi_scan_stop();
     esp_wifi_disconnect();
@@ -276,25 +314,52 @@ void os_wifi_resume(void)
     s_suspended = false;
     s_state = OS_WIFI_IDLE;
     s_retries = 0;
-    if (s_ssid[0]) {
+    if (s_enabled && s_ssid[0]) {
         start_connect_locked();
+    } else {
+        park_locked();
     }
     UNLOCK();
 }
 
-// STUB for the HH GtS contract; firmware agent "fw-core" makes Wi-Fi off at boot.
 void os_wifi_set_enabled(bool on)
 {
-    char ssid[33], pass[65];
-    if (on && os_wifi_saved_ssid(ssid, sizeof(ssid))) {
-        if (!os_wifi_saved_pass(pass, sizeof(pass))) {
-            pass[0] = 0;
+    if (on) {
+        char ssid[33], pass[65] = "";
+        if (os_wifi_saved_ssid(ssid, sizeof(ssid))) {
+            os_wifi_saved_pass(pass, sizeof(pass));
+            os_wifi_connect(ssid, pass);
         }
-        os_wifi_connect(ssid, pass);
+        return;
     }
+    LOCK();
+    bool was = s_enabled;
+    s_enabled = false;
+    s_save_on_ip = false;
+    if (!s_suspended) {
+        s_state = OS_WIFI_IDLE;
+        s_ip[0] = 0;
+        s_fail = NULL;
+    }
+    UNLOCK();
+    if (was) {
+        ESP_LOGI(TAG, "wifi off");
+        esp_wifi_disconnect();
+    }
+    LOCK();
+    park_locked();          // the disconnect event parks again if the driver was busy
+    UNLOCK();
 }
 
 bool os_wifi_enabled(void)
 {
-    return os_wifi_state() == OS_WIFI_CONNECTED || os_wifi_state() == OS_WIFI_CONNECTING;
+    return s_enabled;
+}
+
+void os_wifi_set_park_channel(int channel)
+{
+    LOCK();
+    s_park = channel;
+    park_locked();
+    UNLOCK();
 }
