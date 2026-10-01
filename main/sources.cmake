@@ -4,6 +4,14 @@
 # hardware or ESP-IDF services belongs in SOLANA_OS_DEVICE_SRCS, and each of
 # those needs an emulator counterpart.
 
+# Lua 5.4 for store apps (lua/vendor/LICENSE): the core and the libraries the
+# sandbox offers, no io/os/package/debug.
+set(SOLANA_OS_LUA_VENDOR_SRCS)
+foreach(f lapi lauxlib lbaselib lcode lcorolib lctype ldebug ldo ldump lfunc lgc llex lmathlib lmem
+          lobject lopcodes lparser lstate lstring lstrlib ltable ltablib ltm lundump lutf8lib lvm lzio)
+    list(APPEND SOLANA_OS_LUA_VENDOR_SRCS lua/vendor/${f}.c)
+endforeach()
+
 set(SOLANA_OS_SRCS
     core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c
     core/os_mesh.c core/os_api.c core/os_data.c core/os_cmd.c
@@ -17,6 +25,8 @@ set(SOLANA_OS_SRCS
     apps/debug/debug_app.c
     apps/settings/settings_app.c
     apps/about/about_app.c
+    lua/lua_host.c lua/lua_ui.c lua/lua_sys.c lua/lua_net.c lua/lua_json.c lua/lua_pkg.c lua/lua_cmd.c
+    ${SOLANA_OS_LUA_VENDOR_SRCS}
     assets/sol_mono_12.c assets/sol_font_14.c assets/sol_font_20.c assets/sol_font_32.c
     assets/img_logomark_16.c assets/img_logomark_40.c assets/img_logomark_72.c
     assets/img_foundation.c assets/img_foundation_black.c

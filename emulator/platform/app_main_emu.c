@@ -13,6 +13,7 @@
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
 #include "core/console.h"
+#include "lua/lua_host.h"
 #include "game/game.h"
 
 static const char *TAG = "solana_os";
@@ -69,6 +70,7 @@ void app_main(void)
     page_origin(origin, sizeof(origin));
     os_cloud_set_server(origin);
     boot_sweep();
+    lua_host_init();
 
     console_start();
     os_start();

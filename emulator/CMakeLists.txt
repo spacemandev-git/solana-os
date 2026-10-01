@@ -128,7 +128,7 @@ target_link_options(solana-os PRIVATE
     -sSTACK_SIZE=256KB
     -sEXIT_RUNTIME=0
     -sEXPORTED_FUNCTIONS=_main
-    -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,HEAPU8,HEAPU32
+    -sEXPORTED_RUNTIME_METHODS=ccall,UTF8ToString,HEAPU8,HEAPU32,FS
     -sINCOMING_MODULE_JS_API=print,printErr,locateFile,onAbort
 )
 
