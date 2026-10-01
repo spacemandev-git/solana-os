@@ -40,8 +40,6 @@ static const char *TAG = "lua";
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
 #define LH_READ_CHUNK       256
-#define LH_GC_PAUSE         120         // collect when the heap grows 20 % over the live data
-#define LH_GC_STEPMUL       200
 
 SemaphoreHandle_t lh_mx;
 lh_t *lh_cur;
@@ -289,11 +287,14 @@ static int boot(lua_State *L)
         lua_error(L);
     }
     lua_setfield(L, LUA_REGISTRYINDEX, "solana.main");
-    // Drop the compiler's garbage now, and collect early from here on: the
-    // cap is a ceiling, and every KB the script holds is gone from the
-    // badge's heap (TLS needs ~30 KB of it for each server call).
+    // Drop the compiler's garbage now, then collect generationally: apps
+    // churn short-lived strings and tables every tick, and young
+    // collections keep the heap near the live data (mesh-wave peaked at
+    // 31 KB instead of 45 KB with the incremental collector). The cap is a
+    // ceiling; every KB a script holds is gone from the badge's heap, and
+    // TLS needs ~30 KB of it for each server call.
     lua_gc(L, LUA_GCCOLLECT);
-    lua_gc(L, LUA_GCINC, LH_GC_PAUSE, LH_GC_STEPMUL, 0);
+    lua_gc(L, LUA_GCGEN, 0, 0);
     return 0;
 }
 
