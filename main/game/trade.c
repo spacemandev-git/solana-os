@@ -25,7 +25,7 @@
 static const char *TAG = "trade";
 
 #define TRADES_FILE     "trades.jsonl"
-#define TERMS_MAX       768
+#define TERMS_MAX       1100
 #define RESEND_MS       3000        // invite / terms repeat, offer + lock sync
 #define OFFER_DEBOUNCE  400         // LEFT/RIGHT on !LAMPs repeats fast
 #define INVITE_WAIT_MS  30000
@@ -939,9 +939,9 @@ int trade_records_load(trade_rec_t **out, int max)
         return 0;
     }
     trade_rec_t *recs = calloc(max, sizeof(trade_rec_t));
-    char *line = malloc(1536);
+    char *line = malloc(2048);
     int n = 0;
-    while (recs && line && fgets(line, 1536, f)) {
+    while (recs && line && fgets(line, 2048, f)) {
         cJSON *j = cJSON_Parse(line);
         const char *tid = game_jstr(j, "tid");
         int i;

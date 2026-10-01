@@ -14,7 +14,7 @@
 
 #define TRADE_MAX_ITEMS     6           // per side: keeps offers and terms in one mesh message
 #define TRADE_MAX_PAGES     6           // page copies per side
-#define TRADE_ID_LEN        40
+#define TRADE_ID_LEN        48          // page ids: server allows 48
 #define TRADE_NAME_LEN      40
 #define TRADE_INVITES_MAX   3
 #define TRADE_INVITE_TTL_MS 60000

@@ -137,6 +137,7 @@ static void home_row(int i, ui_row_t *r, void *ctx)
 
 static void nearby_refresh(void)
 {
+    int before = s->ninvites;
     s->ninvites = 0;
     for (int i = 0; i < trade_invite_count(); i++) {
         s->invites[s->ninvites++] = *trade_invite(i);
@@ -149,6 +150,9 @@ static void nearby_refresh(void)
         }
     }
     ui_list_set_count(s->list, s->ninvites + s->npeers);
+    if (s->ninvites > before) {
+        ui_list_select(s->list, 0);     // a new invite goes to the top and takes the selection
+    }
 }
 
 static void trades_refresh(void)
@@ -177,7 +181,7 @@ static void show_tab(int tab)
 
 // ---------------------------------------------------------------------------
 // Tradable goods: items (inventory) and pages you own, from the server,
-// cached for offline trading.
+// cached for offline trading. The page list has every page; keep the owned ones.
 
 static void goods_add(bool page, const char *id, const char *name, const char *detail, int count)
 {
@@ -314,7 +318,7 @@ static void goods_next(void)
     if (!s->goods_items_done) {
         snprintf(path, sizeof(path), "/api/device/inventory%s%s", s->goods_cursor[0] ? "?cursor=" : "", s->goods_cursor);
     } else {
-        snprintf(path, sizeof(path), "/api/device/guide/pages?owned=1&limit=20%s%s",
+        snprintf(path, sizeof(path), "/api/device/guide/pages?limit=20%s%s",
                  s->goods_cursor[0] ? "&cursor=" : "", s->goods_cursor);
     }
     if (os_api_call("GET", path, NULL, 0, goods_page, s) != ESP_OK) {

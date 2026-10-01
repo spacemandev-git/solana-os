@@ -107,6 +107,7 @@ static void nearby_refresh(void)
     if (sel) {
         strlcpy(keep, sel, sizeof(keep));
     }
+    int before = s->npending;
     s->npending = 0;
     for (int i = 0; i < xdex_pending_count() && i < XDEX_PENDING_MAX; i++) {
         s->pending[s->npending++] = *xdex_pending(i);
@@ -118,7 +119,8 @@ static void nearby_refresh(void)
             s->peers[s->npeers++] = s->peers[i];
         }
     }
-    int pick = -1;
+    // A new request goes to the top and takes the selection.
+    int pick = s->npending > before ? 0 : -1;
     for (int i = 0; keep[0] && i < s->npending + s->npeers && pick < 0; i++) {
         bool pending = i < s->npending;
         const char *id = pending ? s->pending[i].card.id : s->peers[i - s->npending].id;

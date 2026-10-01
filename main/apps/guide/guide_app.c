@@ -58,7 +58,7 @@ static const struct {
 enum { R_COMMON, R_RARE, R_EPIC, R_LEGENDARY };
 
 typedef struct {
-    char id[41];
+    char id[49];
     char title[49];
     int number, count;
     uint8_t cat, rarity;
@@ -107,7 +107,7 @@ typedef struct {
     int64_t pages_at;
     // Reader
     lv_obj_t *body_scroll, *body;
-    char reading[41];
+    char reading[49];
     // Packs
     pack_t packs[PACKS_MAX];
     int npacks;

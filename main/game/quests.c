@@ -306,19 +306,6 @@ static void dl_start(const char *app, const char *beacon)
     s_dl.state = QDL_RUNNING;
 }
 
-// Characters of a JS string (UTF-16 code units) in UTF-8 text: the unit of
-// `off` and `total` (server/API.md).
-static int utf16_len(const char *s)
-{
-    int n = 0;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if ((*p & 0xC0) != 0x80) {
-            n += *p >= 0xF0 ? 2 : 1;
-        }
-    }
-    return n;
-}
-
 static void on_app_chunk(const cJSON *res)
 {
     const char *data = game_jstr(res, "data");
@@ -341,7 +328,7 @@ static void on_app_chunk(const cJSON *res)
         ok = fclose(f) == 0 && ok;
     }
     s_dl.total = total;
-    s_dl.off += utf16_len(data);
+    s_dl.off += len;                    // API.md: off and total count bytes
     if (!ok) {
         dl_fail("couldn't write to the microSD card");
         return;
@@ -369,7 +356,7 @@ static void on_app_chunk(const cJSON *res)
     s_dl.state = QDL_DONE;
     os_toast("New app. Open it from Apps");
     game_led_flash(COL_ORANGE);
-    ESP_LOGI(TAG, "app %s saved (%d chars)", s_dl.id, total);
+    ESP_LOGI(TAG, "app %s saved (%d bytes)", s_dl.id, total);
 }
 
 const quest_download_t *quests_download(void)
