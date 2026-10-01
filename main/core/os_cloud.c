@@ -2,8 +2,12 @@
 //
 // One low-priority task owns the conversation: it waits for Wi-Fi and a
 // configured server, says hello, and then repeats every `poll` seconds (or
-// with backoff after errors). Everything it learns goes into s_info under a
-// mutex; the My Badge app and the console only read snapshots of it.
+// with backoff after errors). Between hellos it runs the device API queue and
+// the outbox (os_api.c, through os_net.h), so the badge never has two HTTP
+// requests in flight. Everything it learns goes into s_info under a mutex;
+// apps and the console only read snapshots of it. The owner's figures, the
+// mesh key and channel live in NVS, because Wi-Fi is off at every boot and
+// the badge must work offline.
 //
 // Portable: only os_http, os_wifi_state(), NVS, the MAC, the app version,
 // FreeRTOS tasks and cJSON. The emulator compiles this file unchanged and can
@@ -19,18 +23,26 @@
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
+#include "nvs_flash.h"
 #include "cJSON.h"
 #include "os.h"
 #include "os_cloud.h"
+#include "os_cmd.h"
+#include "os_data.h"
 #include "os_http.h"
+#include "os_net.h"
 #include "os_wifi.h"
 
 static const char *TAG = "os_cloud";
 
 #ifndef CONFIG_SOLANA_OS_SERVER_URL
 #define CONFIG_SOLANA_OS_SERVER_URL ""
+#endif
+#ifndef CONFIG_SOLANA_OS_MESH_CHANNEL
+#define CONFIG_SOLANA_OS_MESH_CHANNEL 1
 #endif
 #ifndef OS_CLOUD_MODEL
 #define OS_CLOUD_MODEL      "bp26"
@@ -47,6 +59,12 @@ static const char *TAG = "os_cloud";
 #define ERRORS_TO_SHOW  3               // transient failures keep the last good screen
 #define WIFI_CHECK_MS   1000
 #define DEFER_S         10              // retry delay when the heap can't hold a request
+#define HOME_WAIT_MS    3000            // owner change: wait this long for the launcher
+
+// Task notification bits.
+#define BIT_REFRESH     (1u << 0)       // hello now
+#define BIT_WORK        (1u << 1)       // API request or outbox entry queued
+#define BIT_RESET       (1u << 2)       // factory reset
 
 extern const os_app_t app_wifi, app_badge;
 
@@ -54,7 +72,10 @@ static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
 static os_cloud_info_t s_info;
 static char s_secret[96];
+static uint8_t s_key[16];
+static char s_owner_tag[9];             // last owner's tag, kept while unclaimed
 static int64_t s_next_ms = -1;          // next hello, -1 = not scheduled
+static int64_t s_time_off;              // server unix ms - esp_timer ms, 0 = never synced
 static int s_poll_s;                    // last `poll` from the server, 0 = none yet
 
 static int64_t now_ms(void)
@@ -73,7 +94,7 @@ static void unlock(void)
 }
 
 // ---------------------------------------------------------------------------
-// NVS "cloud": server, id, secret
+// NVS "cloud": server, id, secret, key, mesh channel and the owner's figures
 
 static void nvs_load(const char *key, char *out, size_t n)
 {
@@ -86,6 +107,17 @@ static void nvs_load(const char *key, char *out, size_t n)
         }
         nvs_close(h);
     }
+}
+
+static int nvs_load_int(const char *key, int def)
+{
+    nvs_handle_t h;
+    int32_t v = def;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_i32(h, key, &v);
+        nvs_close(h);
+    }
+    return v;
 }
 
 static void nvs_save(const char *key, const char *val)
@@ -104,6 +136,32 @@ static void nvs_save(const char *key, const char *val)
     nvs_close(h);
 }
 
+static void nvs_save_int(const char *key, int val)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_i32(h, key, val);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static bool hex_decode(const char *hex, uint8_t *out, size_t n)
+{
+    if (!hex || strlen(hex) != n * 2) {
+        return false;
+    }
+    for (size_t i = 0; i < n * 2; i++) {
+        char c = hex[i];
+        int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (v < 0) {
+            return false;
+        }
+        out[i / 2] = i % 2 ? (out[i / 2] | v) : v << 4;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Hello
 
@@ -112,7 +170,9 @@ typedef struct {
     bool ok, claimed;
     bool deferred;                  // not sent: too little heap right now (e.g. a big app is open)
     char id[16], secret[96], claim_url[160], owner[64];
-    int poll;
+    char key[33], user[9];
+    int poll, mesh, lamps, level, packs;
+    int64_t time;
     const char *error;
 } hello_t;
 
@@ -150,6 +210,12 @@ static void owner_label(const cJSON *o, char *out, size_t n)
     }
 }
 
+static int num_or(const cJSON *j, const char *key, int def)
+{
+    const cJSON *v = cJSON_GetObjectItem(j, key);
+    return cJSON_IsNumber(v) ? (int)v->valuedouble : def;
+}
+
 static void parse(const char *body, hello_t *r)
 {
     cJSON *j = cJSON_Parse(body);
@@ -170,11 +236,18 @@ static void parse(const char *body, hello_t *r)
     }
     const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(j, "id"));
     const char *secret = cJSON_GetStringValue(cJSON_GetObjectItem(j, "secret"));
+    const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(j, "key"));
+    const char *user = cJSON_GetStringValue(cJSON_GetObjectItem(j, "user"));
     const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(j, "claimUrl"));
     const cJSON *owner = cJSON_GetObjectItem(j, "owner");
-    const cJSON *poll = cJSON_GetObjectItem(j, "poll");
+    const cJSON *time = cJSON_GetObjectItem(j, "time");
     r->claimed = cJSON_IsTrue(cJSON_GetObjectItem(j, "claimed"));
-    r->poll = cJSON_IsNumber(poll) ? (int)poll->valuedouble : POLL_DEFAULT_S;
+    r->poll = num_or(j, "poll", POLL_DEFAULT_S);
+    r->mesh = num_or(j, "mesh", 0);
+    r->lamps = num_or(j, "lamps", 0);
+    r->level = num_or(j, "level", 0);
+    r->packs = num_or(j, "packs", 0);
+    r->time = cJSON_IsNumber(time) ? (int64_t)time->valuedouble : 0;
     if (!id || !id[0] || strlen(id) >= sizeof(r->id)) {
         r->error = "Bad response from the server";
     } else if (!r->claimed && (!url || strlen(url) >= sizeof(r->claim_url))) {
@@ -184,32 +257,41 @@ static void parse(const char *body, hello_t *r)
         if (secret && strlen(secret) < sizeof(r->secret)) {
             strlcpy(r->secret, secret, sizeof(r->secret));
         }
+        uint8_t k[16];
+        if (key && hex_decode(key, k, sizeof(k))) {
+            strlcpy(r->key, key, sizeof(r->key));
+        }
         if (url && !r->claimed) {
             strlcpy(r->claim_url, url, sizeof(r->claim_url));
         }
         if (r->claimed) {
             owner_label(cJSON_IsObject(owner) ? owner : NULL, r->owner, sizeof(r->owner));
+            if (user && strlen(user) < sizeof(r->user)) {
+                strlcpy(r->user, user, sizeof(r->user));
+            }
         }
         r->ok = true;
     }
     cJSON_Delete(j);
 }
 
-static void hello(const char *server, const char *secret, hello_t *r)
+static void hello(const char *server, const char *secret, bool need_key, hello_t *r)
 {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char url[128], body[128];
+    char url[128], body[160];
     snprintf(url, sizeof(url), "%s/api/badge/hello", server);
-    snprintf(body, sizeof(body), "{\"hw\":\"%s%02x%02x%02x%02x%02x%02x\",\"fw\":\"%s\",\"model\":\"%s\"}",
+    snprintf(body, sizeof(body),
+             "{\"hw\":\"%s%02x%02x%02x%02x%02x%02x\",\"fw\":\"%s\",\"model\":\"%s\",\"needKey\":%s}",
              OS_CLOUD_HW_PREFIX, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-             esp_app_get_description()->version, OS_CLOUD_MODEL);
+             esp_app_get_description()->version, OS_CLOUD_MODEL, need_key ? "true" : "false");
 
     char *resp = malloc(RESP_CAP);
     if (!resp) {
         r->deferred = true;
         return;
     }
+    int64_t t0 = now_ms();
     esp_err_t err = os_http_request("POST", url, secret[0] ? secret : NULL, body, resp, RESP_CAP, &r->status);
     if (err == ESP_ERR_NO_MEM) {
         r->deferred = true;
@@ -217,8 +299,28 @@ static void hello(const char *server, const char *secret, hello_t *r)
         r->error = "Can't reach the server";
     } else {
         parse(resp, r);
+        if (r->ok && r->time) {
+            // The server stamped `time` somewhere in the round trip: assume the middle.
+            int64_t t1 = now_ms();
+            r->time -= (t0 + t1) / 2;
+        }
     }
     free(resp);
+}
+
+// A different owner claimed this badge: /sdcard/hh belongs to the previous
+// one (docs/HHGTS.md). Go home first so no app has its files open, then
+// wipe, and only then remember the new owner, so an interrupted wipe is
+// redone at the next hello.
+static void owner_changed(const char *user)
+{
+    ESP_LOGW(TAG, "new owner %s (was %s): wiping %s", user, s_owner_tag, OS_DATA_DIR);
+    os_launch(&os_launcher);
+    for (int waited = 0; os_current() != &os_launcher && waited < HOME_WAIT_MS; waited += 50) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    os_outbox_clear();
+    os_data_wipe();
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +336,9 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
 
     if (r->deferred) {
         return DEFER_S;                 // not the server's fault; keep the current state
+    }
+    if (r->ok && r->claimed && r->user[0] && s_owner_tag[0] && strcmp(r->user, s_owner_tag)) {
+        owner_changed(r->user);
     }
     lock();
     if (strcmp(server, s_info.server)) {
@@ -254,8 +359,52 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
             nvs_save("secret", r->secret);
             ESP_LOGI(TAG, "new secret stored");
         }
+        if (r->key[0]) {
+            uint8_t k[16];
+            hex_decode(r->key, k, sizeof(k));
+            if (!s_info.has_key || memcmp(k, s_key, sizeof(k))) {
+                memcpy(s_key, k, sizeof(k));
+                s_info.has_key = true;
+                nvs_save("key", r->key);
+                ESP_LOGI(TAG, "mesh key stored");
+            }
+        }
+        if (r->mesh >= 1 && r->mesh <= 13 && r->mesh != s_info.mesh_channel) {
+            s_info.mesh_channel = r->mesh;
+            nvs_save_int("mesh", r->mesh);
+        }
+        if (r->time) {
+            s_time_off = r->time;
+        }
         strlcpy(s_info.claim_url, r->claim_url, sizeof(s_info.claim_url));
-        strlcpy(s_info.owner, r->owner, sizeof(s_info.owner));
+        if (r->claimed) {
+            if (strcmp(s_info.owner, r->owner)) {
+                nvs_save("owner", r->owner);
+            }
+            if (r->user[0] && strcmp(s_owner_tag, r->user)) {
+                strlcpy(s_owner_tag, r->user, sizeof(s_owner_tag));
+                nvs_save("user", r->user);
+            }
+            if (s_info.lamps != r->lamps || s_info.level != r->level || s_info.packs != r->packs || !s_info.claimed) {
+                nvs_save_int("lamps", r->lamps);
+                nvs_save_int("level", r->level);
+                nvs_save_int("packs", r->packs);
+                nvs_save_int("claimed", 1);
+            }
+            strlcpy(s_info.owner, r->owner, sizeof(s_info.owner));
+            strlcpy(s_info.user, s_owner_tag, sizeof(s_info.user));
+            s_info.lamps = r->lamps;
+            s_info.level = r->level;
+            s_info.packs = r->packs;
+        } else if (s_info.claimed) {
+            // Released: forget the figures, keep the tag (the same owner may claim it again).
+            nvs_save("owner", "");
+            nvs_save_int("claimed", 0);
+            s_info.owner[0] = s_info.user[0] = 0;
+            s_info.lamps = s_info.level = s_info.packs = 0;
+        }
+        s_info.claimed = r->claimed;
+        s_info.synced_ms = now_ms();
         s_info.state = r->claimed ? OS_CLOUD_CLAIMED : OS_CLOUD_UNCLAIMED;
         s_info.error = NULL;
     } else {
@@ -312,6 +461,30 @@ static void set_offline(void)
     unlock();
 }
 
+// Factory reset (docs/HHGTS.md). Online, the server releases the owner and
+// rotates the secret and mesh key; offline the owner releases it on the web.
+static void factory_reset(void)
+{
+    char server[sizeof(s_info.server)], secret[sizeof(s_secret)];
+    lock();
+    strlcpy(server, s_info.server, sizeof(server));
+    strlcpy(secret, s_secret, sizeof(secret));
+    unlock();
+    ESP_LOGW(TAG, "factory reset");
+    if (server[0] && secret[0] && os_wifi_state() == OS_WIFI_CONNECTED) {
+        char url[128], resp[96];
+        int status = 0;
+        snprintf(url, sizeof(url), "%s/api/device/reset", server);
+        esp_err_t err = os_http_request("POST", url, secret, "{}", resp, sizeof(resp), &status);
+        ESP_LOGI(TAG, "reset on the server: %s, HTTP %d", esp_err_to_name(err), status);
+    }
+    os_outbox_clear();
+    os_data_wipe();                     // before NVS, so the owner tag outlives a half-done wipe
+    nvs_flash_erase();
+    ESP_LOGW(TAG, "erased; rebooting");
+    esp_restart();
+}
+
 static void cloud_task(void *arg)
 {
     bool online = false;
@@ -321,9 +494,11 @@ static void cloud_task(void *arg)
     assert(r);
 
     for (;;) {
+        uint32_t bits = 0;
         lock();
         strlcpy(server, s_info.server, sizeof(server));
         strlcpy(secret, s_secret, sizeof(secret));
+        bool need_key = secret[0] && !s_info.has_key;
         int64_t next = s_next_ms;
         unlock();
         if (strcmp(server, prev_server)) {
@@ -338,7 +513,13 @@ static void cloud_task(void *arg)
                 online = false;
                 set_offline();
             }
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WIFI_CHECK_MS));
+            while (os_api_service(false)) {
+                // fail what was queued: no network
+            }
+            xTaskNotifyWait(0, UINT32_MAX, &bits, pdMS_TO_TICKS(WIFI_CHECK_MS));
+            if (bits & BIT_RESET) {
+                factory_reset();
+            }
             continue;
         }
         if (!online) {
@@ -356,9 +537,17 @@ static void cloud_task(void *arg)
 
         int64_t now = now_ms();
         if (next >= 0 && now < next) {
-            // Sleep until due, a refresh, or the next Wi-Fi check.
+            // Between hellos: API requests and the outbox, then sleep until
+            // due, a refresh, new work, or the next Wi-Fi check.
+            if (os_api_service(os_cloud_registered())) {
+                continue;
+            }
             int64_t wait = next - now;
-            if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait > WIFI_CHECK_MS ? WIFI_CHECK_MS : wait))) {
+            xTaskNotifyWait(0, UINT32_MAX, &bits, pdMS_TO_TICKS(wait > WIFI_CHECK_MS ? WIFI_CHECK_MS : wait));
+            if (bits & BIT_RESET) {
+                factory_reset();
+            }
+            if (bits & BIT_REFRESH) {
                 lock();
                 s_next_ms = 0;
                 unlock();
@@ -373,7 +562,7 @@ static void cloud_task(void *arg)
         }
         unlock();
         memset(r, 0, sizeof(*r));
-        hello(server, secret, r);
+        hello(server, secret, need_key, r);
         int delay_s = apply(server, r, &errors, &backoff);
         lock();
         s_info.busy = false;
@@ -386,11 +575,23 @@ static void cloud_task(void *arg)
     }
 }
 
+static int cmd_reset(int argc, char **argv)
+{
+    if (argc != 2 || strcmp(argv[1], "yes")) {
+        printf("Erases this badge: releases its owner (if online), wipes %s and NVS, reboots.\nRun: reset yes\n",
+               OS_DATA_DIR);
+        return 1;
+    }
+    os_cloud_factory_reset();
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // API
 
 void os_cloud_init(void)
 {
+    char key[33];
     s_lock = xSemaphoreCreateMutex();
     nvs_load("server", s_info.server, sizeof(s_info.server));
     if (!s_info.server[0]) {
@@ -398,9 +599,25 @@ void os_cloud_init(void)
     }
     nvs_load("id", s_info.id, sizeof(s_info.id));
     nvs_load("secret", s_secret, sizeof(s_secret));
+    nvs_load("key", key, sizeof(key));
+    s_info.has_key = hex_decode(key, s_key, sizeof(s_key));
+    s_info.mesh_channel = nvs_load_int("mesh", CONFIG_SOLANA_OS_MESH_CHANNEL);
+    nvs_load("user", s_owner_tag, sizeof(s_owner_tag));
+    s_info.claimed = nvs_load_int("claimed", 0) == 1;
+    if (s_info.claimed) {
+        nvs_load("owner", s_info.owner, sizeof(s_info.owner));
+        strlcpy(s_info.user, s_owner_tag, sizeof(s_info.user));
+        s_info.lamps = nvs_load_int("lamps", 0);
+        s_info.level = nvs_load_int("level", 0);
+        s_info.packs = nvs_load_int("packs", 0);
+    }
     s_info.state = OS_CLOUD_OFFLINE;
-    ESP_LOGI(TAG, "server '%s', badge id '%s'%s", s_info.server, s_info.id, s_secret[0] ? ", has secret" : "");
-    xTaskCreate(cloud_task, "cloud", 5120, NULL, 2, &s_task);    // HTTPS hello peaks at ~3.4 KB
+    ESP_LOGI(TAG, "server '%s', badge id '%s'%s%s%s", s_info.server, s_info.id, s_secret[0] ? ", has secret" : "",
+             s_info.has_key ? ", has mesh key" : "", s_info.claimed ? ", claimed" : "");
+    os_api_init();
+    os_cmd_register("reset", "reset yes - factory reset: release the owner, wipe /sdcard/hh and NVS", cmd_reset);
+    // HTTPS peaks at ~3.4 KB of stack; outbox lines and downloads add file I/O.
+    xTaskCreate(cloud_task, "cloud", 6144, NULL, 2, &s_task);
 }
 
 void os_cloud_get_info(os_cloud_info_t *out)
@@ -414,8 +631,37 @@ void os_cloud_get_info(os_cloud_info_t *out)
 void os_cloud_refresh(void)
 {
     if (s_task) {
-        xTaskNotifyGive(s_task);
+        xTaskNotify(s_task, BIT_REFRESH, eSetBits);
     }
+}
+
+void os_cloud_kick(void)
+{
+    if (s_task) {
+        xTaskNotify(s_task, BIT_WORK, eSetBits);
+    }
+}
+
+void os_cloud_factory_reset(void)
+{
+    if (s_task) {
+        xTaskNotify(s_task, BIT_RESET, eSetBits);
+    }
+}
+
+bool os_cloud_registered(void)
+{
+    lock();
+    bool ok = s_info.server[0] && s_info.id[0] && s_secret[0];
+    unlock();
+    return ok;
+}
+
+void os_cloud_server(char *out, size_t n)
+{
+    lock();
+    strlcpy(out, s_info.server, n);
+    unlock();
 }
 
 void os_cloud_set_server(const char *url)
@@ -433,10 +679,11 @@ void os_cloud_set_server(const char *url)
     lock();
     bool changed = strcmp(clean, s_info.server) != 0;
     if (changed) {
-        // The ID and secret belong to the old server.
+        // The ID, secret and mesh key belong to the old server.
         strlcpy(s_info.server, clean, sizeof(s_info.server));
-        s_info.id[0] = s_info.claim_url[0] = s_info.owner[0] = 0;
+        s_info.id[0] = s_info.claim_url[0] = 0;
         s_secret[0] = 0;
+        s_info.has_key = false;
         s_info.state = OS_CLOUD_OFFLINE;
         s_info.error = NULL;
         s_next_ms = -1;
@@ -448,13 +695,11 @@ void os_cloud_set_server(const char *url)
     if (changed) {
         nvs_save("id", "");
         nvs_save("secret", "");
+        nvs_save("key", "");
         ESP_LOGI(TAG, "server set to '%s'", clean);
     }
     os_cloud_refresh();
 }
-
-// ---------------------------------------------------------------------------
-// STUBS for the HH GtS contract (os_cloud.h); firmware agent "fw-core" implements them.
 
 bool os_cloud_bearer(char *out, size_t n)
 {
@@ -467,18 +712,43 @@ bool os_cloud_bearer(char *out, size_t n)
 
 bool os_cloud_mesh_key(uint8_t out[16])
 {
-    return false;
+    lock();
+    bool ok = s_info.has_key;
+    if (ok) {
+        memcpy(out, s_key, sizeof(s_key));
+    }
+    unlock();
+    return ok;
 }
 
 int64_t os_cloud_time_ms(void)
 {
-    return 0;
+    lock();
+    int64_t off = s_time_off;
+    unlock();
+    return off ? now_ms() + off : 0;
 }
 
 void os_cloud_note_lamps(int lamps, int level)
 {
     lock();
+    bool changed = s_info.claimed && (s_info.lamps != lamps || s_info.level != level);
     s_info.lamps = lamps;
     s_info.level = level;
     unlock();
+    if (changed) {
+        nvs_save_int("lamps", lamps);
+        nvs_save_int("level", level);
+    }
+}
+
+void os_cloud_note_packs(int packs)
+{
+    lock();
+    bool changed = s_info.claimed && s_info.packs != packs;
+    s_info.packs = packs;
+    unlock();
+    if (changed) {
+        nvs_save_int("packs", packs);
+    }
 }

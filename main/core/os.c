@@ -2,6 +2,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -35,6 +36,7 @@ typedef struct {
 } os_event_t;
 
 static QueueHandle_t s_q;
+static TaskHandle_t s_task;
 static const os_app_t *s_app;
 static lv_obj_t *s_root, *s_title, *s_wifi, *s_batt, *s_toast;
 static int64_t s_toast_until;
@@ -173,21 +175,39 @@ static void status_update(void)
 // ---------------------------------------------------------------------------
 // Toast
 
-void os_toast(const char *fmt, ...)
+#define TOAST_LEN   96
+
+static void toast_show(const char *msg)
 {
-    char msg[96];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
-    if (!lvgl_port_lock(0)) {
-        return;
-    }
     lv_label_set_text(s_toast, msg);
     lv_obj_set_hidden(s_toast, false);
     lv_obj_align(s_toast, LV_ALIGN_BOTTOM_MID, 0, -22);
     s_toast_until = now_ms() + TOAST_MS;
-    lvgl_port_unlock();
+}
+
+static void toast_posted(void *arg)
+{
+    toast_show(arg);
+    free(arg);
+}
+
+// Other tasks hand the text to the OS task instead of waiting for the LVGL
+// lock: a mesh or API handler must never block on the UI.
+void os_toast(const char *fmt, ...)
+{
+    char msg[TOAST_LEN];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    if (s_task && xTaskGetCurrentTaskHandle() == s_task) {
+        toast_show(msg);
+        return;
+    }
+    char *copy = strdup(msg);
+    if (copy && !os_post(toast_posted, copy)) {
+        free(copy);
+    }
 }
 
 static void toast_create(void)
@@ -473,7 +493,7 @@ void os_start(void)
     if (bsp_buttons_start(on_buttons) != ESP_OK) {
         ESP_LOGE(TAG, "buttons unavailable; use the console 'key' command");
     }
-    xTaskCreate(os_task, "os", 6144, NULL, 4, NULL);
+    xTaskCreate(os_task, "os", 6144, NULL, 4, &s_task);
 }
 
 // Settings changed the theme: rebuild everything that holds colours, then

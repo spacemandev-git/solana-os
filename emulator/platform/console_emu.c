@@ -39,11 +39,15 @@ static void cmd_wifi(int argc, char **argv)
         os_wifi_forget();
         return;
     }
+    if (!strcmp(sub, "on") || !strcmp(sub, "off")) {
+        os_wifi_set_enabled(!strcmp(sub, "on"));
+        return;
+    }
     static const char *names[] = {"idle", "connecting", "connected", "failed", "suspended"};
     os_wifi_info_t in;
     os_wifi_get_info(&in);
-    printf("wifi: %s  ssid='%s' ip=%s rssi=%d ch=%d %s\n", names[in.state], in.ssid, in.ip, in.rssi, in.channel,
-           in.fail_reason ? in.fail_reason : "");
+    printf("wifi: %s (%s)  ssid='%s' ip=%s rssi=%d ch=%d %s\n", names[in.state], in.enabled ? "on" : "off", in.ssid,
+           in.ip, in.rssi, in.channel, in.fail_reason ? in.fail_reason : "");
 }
 
 EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
@@ -61,7 +65,7 @@ EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
     const char *cmd = argv[0];
     if (!strcmp(cmd, "help")) {
         printf("commands: info, apps, open <id|home|calib>, key <up|down|left|right|select|back|home>...,\n"
-               "          wifi [status|connect <ssid> [pass]|forget], cloud, server <url|clear>,\n"
+               "          wifi [status|on|off|connect <ssid> [pass]|forget], cloud, server <url|clear>,\n"
                "          rgb <i|all> <r> <g> <b>, shot, heap\n");
         for (int i = 0; i < os_cmd_count(); i++) {
             printf("          %s\n", os_cmd_get(i)->help);
