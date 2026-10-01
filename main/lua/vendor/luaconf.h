@@ -806,10 +806,21 @@
 #if !defined(LUAI_MAXCCALLS)
 #define LUAI_MAXCCALLS		64
 #endif
-/* the same for pattern matching recursion (lstrlib.c) */
+/* pattern matching recursion depth (lstrlib.c) */
 #if !defined(MAXCCALLS)
-#define MAXCCALLS		64
+#define MAXCCALLS		32
 #endif
+
+/*
+** Solana OS: the count above can't know how big each C level's frames are
+** (a pcall level takes ~700 bytes on the badge, a metamethod ~250), so the
+** host also guards the real stack: luai_cstackfull() is 1 when it runs low
+** (raise "C stack overflow") and 2 when it's critical (error while
+** handling that). Checked where Lua enters a new C level (ldo.c ccall,
+** lstate.c luaE_incCstack). See lua_host.c.
+*/
+int lh_cstack_check(void);
+#define luai_cstackfull()	lh_cstack_check()
 
 
 

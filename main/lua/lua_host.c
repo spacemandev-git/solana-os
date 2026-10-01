@@ -13,10 +13,12 @@
 //
 // Numbers are 32-bit (LUA_32BITS in vendor/luaconf.h): integers and floats
 // both. The C5 has no FPU, so floats are soft-float either way and single
-// precision is the cheaper one; and 8-byte values instead of 16 roughly halve
-// what tables and stacks cost under the 48 KB heap cap. Integers wrap at
-// ±2^31: fine for scores, !LAMPs and sys.time() seconds; larger whole numbers
-// in JSON (ms timestamps) arrive as floats.
+// precision is the cheaper one, and 8-byte values instead of 16 shrink tables
+// and stacks: with the sample apps the heap peaked about 20 % lower than with
+// 64-bit numbers (snake 30.6 KB instead of 37.1 KB, towel-tycoon 28.2 KB
+// instead of 35.3 KB). Integers wrap at ±2^31, which is fine for scores,
+// !LAMPs and sys.time() seconds; bigger whole numbers in JSON (ms
+// timestamps) arrive as floats.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,8 @@
 static const char *TAG = "lua";
 
 #define LH_STACK            (12 * 1024)
+#define LH_STACK_LOW        4096        // left when Lua raises "C stack overflow"
+#define LH_STACK_CRIT       2048        // left when even handling that fails
 #define LH_PRIO             2           // below the mesh task, above idle
 #define LH_HOOK_EVERY       1000        // instructions between budget checks
 #define LH_QUEUE_LEN        16
@@ -40,8 +44,6 @@ static const char *TAG = "lua";
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
 #define LH_READ_CHUNK       256
-#define LH_GC_PAUSE         120         // collect when the heap grows 20 % over the live data
-#define LH_GC_STEPMUL       200
 
 SemaphoreHandle_t lh_mx;
 lh_t *lh_cur;
@@ -53,6 +55,18 @@ static uint32_t s_gen;
 static lua_pkg_t s_next;            // app to start on the next enter (under lh_mx)
 static char s_title[21] = "Lua";
 static bool s_busy;                 // a lua task exists (under lh_mx)
+
+// Native C stack guard (vendor/luaconf.h luai_cstackfull): Lua asks before
+// every new C level. The leaf work under a level (LVGL, printf, JSON, pattern
+// matching) stays within LH_STACK_LOW. 0 off the lua task.
+static uintptr_t s_stack_low, s_stack_crit;
+
+int lh_cstack_check(void)
+{
+    volatile char probe;
+    uintptr_t sp = (uintptr_t)&probe;
+    return !s_stack_low ? 0 : sp < s_stack_crit ? 2 : sp < s_stack_low ? 1 : 0;
+}
 
 int64_t lh_now(void)
 {
@@ -119,11 +133,6 @@ static void show_error(lh_t *s, const char *title, const char *msg)
 {
     lh_ui_close_dialog(s);
     lh_ui_clear(s);
-    if (s->confirm_box) {
-        lv_obj_delete(s->confirm_box);
-        s->confirm_box = NULL;
-        s->confirm = NULL;
-    }
     lv_obj_t *a = s->area;
     lv_obj_set_style_bg_color(a, ui_col(COL_BG), 0);
     lv_obj_t *t = ui_label(a, &sol_font_20, COL_ERR, title);
@@ -294,11 +303,14 @@ static int boot(lua_State *L)
         lua_error(L);
     }
     lua_setfield(L, LUA_REGISTRYINDEX, "solana.main");
-    // Drop the compiler's garbage now, and collect early from here on: the
-    // cap is a ceiling, and every KB the script holds is gone from the
-    // badge's heap (TLS needs ~30 KB of it for each server call).
+    // Drop the compiler's garbage now, then collect generationally: apps
+    // churn short-lived strings and tables every tick, and young
+    // collections keep the heap near the live data (mesh-wave peaked at
+    // 31 KB instead of 45 KB with the incremental collector). The cap is a
+    // ceiling; every KB a script holds is gone from the badge's heap, and
+    // TLS needs ~30 KB of it for each server call.
     lua_gc(L, LUA_GCCOLLECT);
-    lua_gc(L, LUA_GCINC, LH_GC_PAUSE, LH_GC_STEPMUL, 0);
+    lua_gc(L, LUA_GCGEN, 0, 0);
     return 0;
 }
 
@@ -411,6 +423,7 @@ static TickType_t wait_ticks(lh_t *s)
 
 static void task_end(lh_t *s)
 {
+    s_stack_low = s_stack_crit = 0;
     lh_stats = (lh_stats_t){
         .mem_peak = s->mem_peak, .mem_end = s->mem, .steps_peak = s->steps_peak,
         .stack_free = uxTaskGetStackHighWaterMark(NULL), .heap_before = s->heap_before,
@@ -437,6 +450,12 @@ static void task_end(lh_t *s)
 static void lua_task(void *arg)
 {
     lh_t *s = arg;
+    volatile char top;
+    // The stack ends about LH_STACK below this frame (the frames above it put
+    // the real end a few hundred bytes higher; the margins absorb that).
+    uintptr_t bottom = (uintptr_t)&top - LH_STACK;
+    s_stack_low = bottom + LH_STACK_LOW;
+    s_stack_crit = bottom + LH_STACK_CRIT;
     char rel[64], path[160];
     lua_pkg_rel(rel, sizeof(rel), s->pkg.id, "main.lua");
     os_data_path(path, sizeof(path), rel);
@@ -586,9 +605,6 @@ static bool host_key(os_key_t key, bool repeat)
     lh_t *s = lh_cur;
     if (!s || s->failed || s->finished) {
         return key != OS_KEY_BACK;      // error screen: CANCEL exits
-    }
-    if (lh_confirm_key(s, key)) {
-        return true;
     }
     lh_ev_t ev = { .kind = LH_EV_KEY, .key = key, .repeat = repeat, .gen = s->gen };
     lh_post(&ev);

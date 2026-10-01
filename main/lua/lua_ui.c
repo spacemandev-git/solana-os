@@ -482,7 +482,7 @@ static int l_list(lua_State *L)
     if (!s) {
         return 0;
     }
-    // ui_list rows span the screen width; a narrower list is clipped by its box.
+    // A box of our own holds the list, so pos/show/remove work like any object.
     lv_obj_t *box = base_obj(s->area, x, y, w, h);
     lh_obj_t *o = new_obj(L, s, LH_LIST, box);      // pushes the handle
     if (has_select) {
@@ -492,7 +492,7 @@ static int l_list(lua_State *L)
     lua_pushvalue(L, 5);
     o->items_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     s_row_L = L;
-    o->list = ui_list_create(box, 0, h, row_cb, o);
+    o->list = ui_list_create_at(box, 0, 0, w, h, row_cb, o);
     ui_list_set_count(o->list, (int)lua_rawlen(L, 5));
     return 1;
 }

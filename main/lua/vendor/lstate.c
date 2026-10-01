@@ -168,16 +168,17 @@ void luaE_shrinkCI (lua_State *L) {
 ** handling to work).
 */
 void luaE_checkcstack (lua_State *L) {
-  if (getCcalls(L) == LUAI_MAXCCALLS)
+  int full = luai_cstackfull();  /* Solana OS: native stack guard */
+  if (getCcalls(L) == LUAI_MAXCCALLS || full == 1)
     luaG_runerror(L, "C stack overflow");
-  else if (getCcalls(L) >= (LUAI_MAXCCALLS / 10 * 11))
+  else if (getCcalls(L) >= (LUAI_MAXCCALLS / 10 * 11) || full == 2)
     luaD_errerr(L);  /* error while handling stack error */
 }
 
 
 LUAI_FUNC void luaE_incCstack (lua_State *L) {
   L->nCcalls++;
-  if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS))
+  if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS || luai_cstackfull()))  /* Solana OS */
     luaE_checkcstack(L);
 }
 

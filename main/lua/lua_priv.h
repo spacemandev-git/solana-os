@@ -29,8 +29,9 @@
 #define LH_STORAGE_SAVE_MS  1000        // storage.set writes at most this often
 #define LH_MESH_PER_S       4
 #define LH_MESH_MAX         200         // bytes of JSON per mesh.send
-#define LH_CALLS_MAX        8           // API requests in flight
-#define LH_JSON_DEPTH       24
+#define LH_CALLS_MAX        16          // server calls waiting or in flight per app
+#define LH_CALLS_SENT       3           // at once in os_api, whose queue the OS shares
+#define LH_JSON_DEPTH       16          // nesting; bounds the decoder's recursion
 #define LH_LED_COUNT        8
 
 typedef enum { LH_LABEL, LH_RECT, LH_BAR, LH_GRADIENT, LH_LIST, LH_KIND_COUNT } lh_kind_t;
@@ -58,12 +59,15 @@ typedef struct lh_call {
     uint32_t token;             // os_api ctx: a number, never a pointer
     int cb_ref;
     uint8_t op;
+    uint8_t state;              // LH_CALL_*
     bool done;
     int status;                 // HTTP status, 0 = no answer
     char *body;
     const char *err;            // local outcome: "denied", "offline", ...
-    char *method, *path, *req;  // kept while the OS confirm dialog is open
+    char *method, *path, *req;  // until it's sent
 } lh_call_t;
+
+enum { LH_CALL_QUEUED, LH_CALL_CONFIRM, LH_CALL_SENT };
 
 typedef struct lh {
     lua_State *L;
@@ -116,8 +120,6 @@ typedef struct lh {
 
     // Server calls
     lh_call_t *calls;
-    lh_call_t *confirm;         // waiting for the OS confirm dialog
-    lv_obj_t *confirm_box;
 } lh_t;
 
 // Figures from the last run, for "lua mem".
@@ -184,7 +186,6 @@ void lh_storage_flush(lh_t *s, bool force);
 // lua_net.c: mesh, lamps, items, profile, quest
 void lh_open_net(lua_State *L);
 void lh_calls_run(lh_t *s);                             // answer finished calls
-bool lh_confirm_key(lh_t *s, os_key_t key);             // OS task: the spend/transfer dialog
 void lh_net_stop(lh_t *s);                              // OS task, after the Lua task ended
 void lh_calls_free(lh_t *s);
 void lh_mesh_event(lh_t *s, char *data);

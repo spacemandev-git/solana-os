@@ -330,7 +330,17 @@ static void build_claimed(const os_cloud_info_t *in)
     tile(3, buf, "Packs", in->packs ? COL_GREEN : COL_TEXT);
 
     lv_obj_t *action;
-    if (in->packs > 0) {
+    if (in->welcome_needs_x && !in->packs) {
+        // The welcome (Starter Pack + !LAMPs) waits for a linked X account.
+        char host[64];
+        host_of(in->server, host, sizeof(host));
+        action = ui_label(s_view, &sol_mono_12, COL_YELLOW, "");
+        lv_label_set_text_fmt(action, "Link X at %s/profile to get your Starter Pack and 100 !LAMPs", host);
+        lv_obj_set_width(action, OS_ROOT_W - 16);
+        lv_label_set_long_mode(action, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_style_text_align(action, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(action, LV_ALIGN_TOP_MID, 0, 132);
+    } else if (in->packs > 0) {
         action = ui_panel(s_view, 8, 138, OS_ROOT_W - 16, 30);
         lv_obj_set_style_border_color(action, ui_col(COL_GREEN), 0);
         lv_obj_set_style_pad_ver(action, 5, 0);
@@ -495,6 +505,7 @@ static void render(bool force)
              && !strcmp(in->owner, s_last->owner) && in->error == s_last->error && !strcmp(in->server, s_last->server)
              && !strcmp(in->message, s_last->message)
              && in->lamps == s_last->lamps && in->level == s_last->level && in->packs == s_last->packs
+             && in->welcome_needs_x == s_last->welcome_needs_x
              && same_me(&s_me, &s_me_shown) && (v != V_CLAIMED || ui_net_state(false) == s_net_shown);
     if (!same) {
         build(in, v);

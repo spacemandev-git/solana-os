@@ -1,11 +1,14 @@
 #pragma once
 
 // Minimal blocking HTTP for os_cloud and os_api. The badge implements it with
-// esp_http_client (core/os_http.c); the emulator with the browser's fetch.
-// Only call it from a task that may block (never the OS/LVGL task): in
-// practice only the cloud task does.
+// esp_http_client (core/os_http.c) over one kept-alive connection to the
+// server, so the TLS handshake (and its heap peak) happens once, not per
+// request; the emulator uses the browser's fetch. Only the cloud task calls
+// in here (never the OS/LVGL task).
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 // method: "GET", "POST", "PATCH" or "DELETE". body: JSON or NULL. bearer:
@@ -22,3 +25,10 @@ esp_err_t os_http_request(const char *method, const char *url, const char *beare
 // ("" if absent).
 esp_err_t os_http_download(const char *url, const char *bearer, const char *path, size_t max,
                            const char *header, char *hdr_out, size_t hdr_cap, int *status);
+
+// The kept-alive connection: closed after 5.5 min without requests (call
+// tick from the cloud task's loop) or at once with close (Wi-Fi gone).
+void os_http_tick(void);
+void os_http_close(void);
+bool os_http_connected(void);               // a connection is open now
+void os_http_stats(uint32_t *requests, uint32_t *connects);

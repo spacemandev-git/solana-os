@@ -22,6 +22,7 @@
 #include "os_wifi.h"
 #include "os_cloud.h"
 #include "os_cmd.h"
+#include "os_http.h"
 
 static const char *TAG = "console";
 
@@ -275,6 +276,10 @@ static int cmd_cloud(int argc, char **argv)
     if (in.message[0]) {
         printf("  server: %s\n", in.message);
     }
+    uint32_t requests, connects;
+    os_http_stats(&requests, &connects);
+    printf("  http: %lu requests on %lu connections, %s\n", (unsigned long)requests, (unsigned long)connects,
+           os_http_connected() ? "connection open" : "no connection");
     return cmd_heap(0, NULL);
 }
 
