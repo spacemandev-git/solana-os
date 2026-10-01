@@ -14,6 +14,7 @@
 //
 // Portable: the emulator runs it over its fetch-based os_http.
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,8 +148,27 @@ esp_err_t os_api_download(const char *path, const char *dest, size_t max_bytes, 
     return enqueue("GET", path, NULL, dest, max_bytes, true, cb, ctx);
 }
 
+void os_api_prewarm(void)
+{
+    if (os_api_online() && !os_http_connected()) {
+        os_cloud_refresh();
+    }
+}
+
+void *os_api_token(void)
+{
+    // Odd values from 0xF0000001 up: no object lives there on the badge or
+    // in the wasm32 emulator, so a token never matches a real pointer.
+    static uint32_t s_next;
+    uint32_t n = __atomic_fetch_add(&s_next, 1, __ATOMIC_RELAXED);
+    return (void *)(uintptr_t)(0xF0000001u + 2u * (n % 0x07FFFFFFu));
+}
+
 void os_api_cancel(void *ctx)
 {
+    if (!ctx) {
+        return;                             // NULL is "nobody's": other modules use it too
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (req_t *r = s_reqs; r; r = r->next) {
         if (r->ctx == ctx) {
@@ -235,6 +255,10 @@ static void run_download(req_t *r, const char *url, const char *bearer)
     if (!b64 || !os_data_ready()) {
         free(b64);
         return;                             // status 0: no card or no memory
+    }
+    size_t root = strlen(OS_DATA_DIR);
+    if (!strncmp(r->dest, OS_DATA_DIR "/", root + 1)) {
+        os_data_mkdirs(r->dest + root + 1);     // apps/<id>/ may not exist yet
     }
     esp_err_t err = os_http_download(url, bearer, tmp, r->cap, "X-App-Manifest", b64, MANIFEST_B64, &r->status);
     if (err != ESP_OK || r->status / 100 != 2) {
@@ -572,8 +596,19 @@ static void print_result(int status, const char *body, void *ctx)
 
 static int cmd_api(int argc, char **argv)
 {
+    if (argc == 4 && !strcmp(argv[1], "download")) {
+        // api download <path> <file under /sdcard/hh>: body to the file, manifest header printed
+        char dest[160];
+        os_data_path(dest, sizeof(dest), argv[3]);
+        esp_err_t err = os_api_download(argv[2], dest, 64 * 1024, print_result, NULL);
+        if (err != ESP_OK) {
+            printf("api: %s\n", esp_err_to_name(err));
+        }
+        return err == ESP_OK ? 0 : 1;
+    }
     if (argc < 3) {
-        printf("usage: api <GET|POST|PATCH|DELETE> <path> [json]   (write ' for \" in json)\n");
+        printf("usage: api <GET|POST|PATCH|DELETE> <path> [json]   (write ' for \" in json)\n"
+               "       api download <path> <file under " OS_DATA_DIR ">\n");
         return 1;
     }
     char *body = NULL;
@@ -624,6 +659,7 @@ void os_api_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
     s_box_lock = xSemaphoreCreateMutex();
-    os_cmd_register("api", "api <GET|POST|PATCH|DELETE> <path> [json] - device API call (' for \")", cmd_api);
+    os_cmd_register("api", "api <GET|POST|PATCH|DELETE> <path> [json] | download <path> <file> - device API (' for \")",
+                    cmd_api);
     os_cmd_register("outbox", "outbox [add <path>] - pending uploads", cmd_outbox);
 }

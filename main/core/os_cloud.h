@@ -15,6 +15,8 @@ typedef enum {
     OS_CLOUD_UNCLAIMED,     // have an ID and a claim URL
     OS_CLOUD_CLAIMED,       // linked to a user account
     OS_CLOUD_ERROR,         // last hello failed; retrying
+    OS_CLOUD_LINKED,        // the server knows this badge as claimed but it lost its secret
+                            // (NVS erased): the owner must release it; see `message`
 } os_cloud_state_t;
 
 typedef struct {
@@ -37,6 +39,8 @@ typedef struct {
     int mesh_channel;       // from hello; default CONFIG_SOLANA_OS_MESH_CHANNEL
     bool claimed;           // linked to an owner (as of the last hello, possibly an earlier boot)
     int64_t synced_ms;      // esp_timer ms of the last good hello this boot, 0 = none yet
+    char message[160];      // OS_CLOUD_LINKED: the server's explanation (ASCII), else ""
+    bool welcome_needs_x;   // hello "welcome":"needs_x": the owner's welcome waits for a linked X account
 } os_cloud_info_t;
 
 void os_cloud_init(void);                   // after os_wifi_init()

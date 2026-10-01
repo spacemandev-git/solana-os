@@ -420,10 +420,12 @@ static void on_buttons(uint32_t pressed, uint32_t changed)
 
 // ---------------------------------------------------------------------------
 // Screenshot: re-render the whole screen and print every flushed area as
-// base64 RGB565 rows. tools/badge.py reassembles them into a PNG.
+// base64 RGB565 rows. tools/badge.py reassembles them into a PNG. The render
+// happens on the LVGL task, like every frame: a deep object tree (the Guide's
+// pack reveal) needs more stack than the OS task has.
 
 static lv_display_flush_cb_t s_orig_flush;
-static bool s_capturing;
+static volatile bool s_capturing;
 
 static void capture_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px)
 {
@@ -440,8 +442,26 @@ static void capture_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     s_orig_flush(disp, area, px);
 }
 
+// LVGL task: the refresh that drew the invalidated screen is done.
+static void capture_done(lv_event_t *e)
+{
+    if (!s_capturing) {
+        return;
+    }
+    lv_display_t *disp = lv_display_get_default();
+    s_capturing = false;
+    disp->flush_cb = s_orig_flush;
+    printf("SHOT-END\n");
+    fflush(stdout);
+    esp_log_level_set("*", ESP_LOG_INFO);
+}
+
+// OS task (LVGL locked): arm the capture; the LVGL task renders it next.
 static void take_screenshot(void)
 {
+    if (s_capturing) {
+        return;
+    }
     lv_display_t *disp = lv_display_get_default();
     s_orig_flush = disp->flush_cb;
     disp->flush_cb = capture_flush;
@@ -450,12 +470,6 @@ static void take_screenshot(void)
     s_capturing = true;
     lv_obj_invalidate(lv_screen_active());
     lv_obj_invalidate(lv_layer_top());
-    lv_refr_now(disp);
-    s_capturing = false;
-    printf("SHOT-END\n");
-    fflush(stdout);
-    disp->flush_cb = s_orig_flush;
-    esp_log_level_set("*", ESP_LOG_INFO);
 }
 
 void os_screenshot(void)
@@ -588,6 +602,7 @@ void os_start(void)
     os_keys_load();
 
     lvgl_port_lock(0);
+    lv_display_add_event_cb(lv_display_get_default(), capture_done, LV_EVENT_REFR_READY, NULL);
     lv_obj_t *scr = lv_screen_active();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_color(scr, ui_col(COL_BG), 0);

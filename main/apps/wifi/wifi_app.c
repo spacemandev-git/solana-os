@@ -32,6 +32,7 @@ static ui_list_t *s_list;
 static ui_kb_t *s_kb;
 static char s_kb_ssid[33];
 static wifi_auth_mode_t s_kb_auth;
+static int s_kb_channel;
 
 static const char *auth_str(wifi_auth_mode_t a)
 {
@@ -100,7 +101,7 @@ static void row(int i, ui_row_t *r, void *ctx)
     os_wifi_get_info(&w);
     char saved[33] = "";
     os_wifi_saved_ssid(saved, sizeof(saved));
-    bool current = w.state == OS_WIFI_CONNECTED && !strcmp(w.ssid, n->ssid);
+    bool current = w.state == OS_WIFI_CONNECTED && !strcmp(w.ssid, n->ssid) && (w.channel > 14) == (n->channel > 14);
 
     strlcpy(r->title, n->ssid[0] ? n->ssid : "(hidden network)", sizeof(r->title));
     snprintf(r->sub, sizeof(r->sub), "%s  ch %d  %s%s%s", band(n->channel), n->channel, auth_str(n->auth),
@@ -229,7 +230,7 @@ static void join(const net_t *n)
 {
     os_wifi_info_t w;
     os_wifi_get_info(&w);
-    if (w.state == OS_WIFI_CONNECTED && !strcmp(w.ssid, n->ssid)) {
+    if (w.state == OS_WIFI_CONNECTED && !strcmp(w.ssid, n->ssid) && (w.channel > 14) == (n->channel > 14)) {
         os_toast("Already connected");
         return;
     }
@@ -239,13 +240,15 @@ static void join(const net_t *n)
     }
     char saved[33] = "", pass[65] = "";
     os_wifi_saved_ssid(saved, sizeof(saved));
+    // The row is one band of the SSID: join on that row's channel.
     if (n->auth == WIFI_AUTH_OPEN || n->auth == WIFI_AUTH_OWE) {
-        os_wifi_connect(n->ssid, "");
+        os_wifi_connect_ch(n->ssid, "", n->channel);
     } else if (saved[0] && !strcmp(saved, n->ssid) && os_wifi_saved_pass(pass, sizeof(pass))) {
-        os_wifi_connect(n->ssid, pass);
+        os_wifi_connect_ch(n->ssid, pass, n->channel);
     } else {
         strlcpy(s_kb_ssid, n->ssid, sizeof(s_kb_ssid));
         s_kb_auth = n->auth;
+        s_kb_channel = n->channel;
         char title[64];
         snprintf(title, sizeof(title), "Password for %s", n->ssid);
         s_kb = ui_kb_create(s_root, title, 63);
@@ -281,7 +284,7 @@ static bool on_key(os_key_t k, bool repeat)
                 os_toast("WPA passwords are at least 8 characters");
                 return true;
             }
-            os_wifi_connect(s_kb_ssid, ui_kb_text(s_kb));
+            os_wifi_connect_ch(s_kb_ssid, ui_kb_text(s_kb), s_kb_channel);
             os_toast("Connecting to %s", s_kb_ssid);
             ui_kb_delete(s_kb);
             s_kb = NULL;

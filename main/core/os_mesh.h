@@ -10,7 +10,10 @@
 //
 // Handlers run on the mesh task, NOT the OS task: copy what you need into your
 // own state (under your own lock) and render it from on_tick, or hop over with
-// os_post().
+// os_post(). Keep them short: the mesh task has ~2 KB of stack to spare, so
+// no SD I/O or HTTP there, and never take the LVGL lock (os_toast() and
+// os_post() are fine). After os_mesh_unsubscribe() returns, the handler is
+// not running and won't be called again.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -59,6 +62,11 @@ int os_mesh_channel(void);                  // the channel peers are expected on
 // Peers heard in the last OS_MESH_PEER_TTL_MS, strongest first.
 int os_mesh_peers(os_mesh_peer_t *out, int max);
 bool os_mesh_peer(const char *id, os_mesh_peer_t *out);
+// Keep a peer in the table whatever else is heard (a trade partner, an
+// accepted X Dex peer); unpin when done. False if the id isn't in the table.
+// Only HELLOs add peers and set their MAC: other messages from an unknown id
+// or another MAC are dropped before any handler sees them.
+bool os_mesh_pin(const char *id, bool pin);
 
 // Send a JSON object (NUL-terminated, ≤ OS_MESH_MSG_MAX) to a peer id, or to
 // everyone with to_id == NULL. Fragments as needed. Never blocks for long.

@@ -145,7 +145,7 @@ typedef struct {
 struct ui_list {
     lv_obj_t *box, *empty, *scroll;
     row_objs_t rows[MAX_ROWS];
-    int visible, count, sel, top;
+    int w, visible, count, sel, top;
     ui_row_cb_t cb;
     void *ctx;
 };
@@ -157,17 +157,23 @@ static void list_deleted(lv_event_t *e)
 
 ui_list_t *ui_list_create(lv_obj_t *parent, int y, int h, ui_row_cb_t cb, void *ctx)
 {
+    return ui_list_create_at(parent, 0, y, OS_ROOT_W, h, cb, ctx);
+}
+
+ui_list_t *ui_list_create_at(lv_obj_t *parent, int x, int y, int w, int h, ui_row_cb_t cb, void *ctx)
+{
     ui_list_t *l = lv_malloc_zeroed(sizeof(*l));
     l->cb = cb;
     l->ctx = ctx;
+    l->w = w;
     l->visible = h / ROW_H;
     if (l->visible > MAX_ROWS) {
         l->visible = MAX_ROWS;
     }
     l->box = lv_obj_create(parent);
     lv_obj_remove_style_all(l->box);
-    lv_obj_set_pos(l->box, 0, y);
-    lv_obj_set_size(l->box, OS_ROOT_W, h);
+    lv_obj_set_pos(l->box, x, y);
+    lv_obj_set_size(l->box, w, h);
     lv_obj_set_scrollable(l->box, false);
     lv_obj_add_event_cb(l->box, list_deleted, LV_EVENT_DELETE, l);
 
@@ -176,7 +182,7 @@ ui_list_t *ui_list_create(lv_obj_t *parent, int y, int h, ui_row_cb_t cb, void *
         r->obj = lv_obj_create(l->box);
         lv_obj_remove_style_all(r->obj);
         lv_obj_set_pos(r->obj, 0, i * ROW_H);
-        lv_obj_set_size(r->obj, OS_ROOT_W - 6, ROW_H);
+        lv_obj_set_size(r->obj, w - 6, ROW_H);
         lv_obj_set_style_bg_color(r->obj, ui_col(COL_PANEL_HI), 0);
         lv_obj_set_style_border_side(r->obj, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_border_width(r->obj, 1, 0);
@@ -189,13 +195,14 @@ ui_list_t *ui_list_create(lv_obj_t *parent, int y, int h, ui_row_cb_t cb, void *
         lv_obj_set_style_bg_color(r->mark, ui_col(COL_PURPLE), 0);
         lv_obj_set_style_bg_grad_color(r->mark, lv_color_hex(COL_GREEN), 0);
         lv_obj_set_style_bg_grad_dir(r->mark, LV_GRAD_DIR_VER, 0);
+        // One line each: a fixed height makes long text end in "..." instead of wrapping.
         r->title = ui_label(r->obj, &sol_font_14, COL_TEXT, "");
         lv_obj_set_pos(r->title, 10, 2);
-        lv_obj_set_width(r->title, 220);
+        lv_obj_set_size(r->title, w - 100, lv_font_get_line_height(&sol_font_14));
         lv_label_set_long_mode(r->title, LV_LABEL_LONG_MODE_DOTS);
         r->sub = ui_label(r->obj, &sol_mono_12, COL_DIM, "");
         lv_obj_set_pos(r->sub, 10, 19);
-        lv_obj_set_width(r->sub, 300);
+        lv_obj_set_size(r->sub, w - 20, lv_font_get_line_height(&sol_mono_12));
         lv_label_set_long_mode(r->sub, LV_LABEL_LONG_MODE_DOTS);
         r->right = ui_label(r->obj, &sol_mono_12, COL_DIM, "");
         lv_obj_align(r->right, LV_ALIGN_TOP_RIGHT, -4, 4);
@@ -208,7 +215,7 @@ ui_list_t *ui_list_create(lv_obj_t *parent, int y, int h, ui_row_cb_t cb, void *
     lv_obj_set_style_radius(l->scroll, 1, 0);
 
     l->empty = ui_label(l->box, &sol_font_14, COL_DIM, "Nothing here yet");
-    lv_obj_set_width(l->empty, OS_ROOT_W - 32);
+    lv_obj_set_width(l->empty, w - 32);
     lv_obj_set_style_text_align(l->empty, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(l->empty, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_align(l->empty, LV_ALIGN_CENTER, 0, 0);
@@ -255,7 +262,7 @@ void ui_list_refresh(ui_list_t *l)
         lv_label_set_text(r->right, row.right);
         lv_obj_set_style_text_color(r->right, ui_col(row.right_color ? row.right_color : COL_DIM), 0);
         // Keep the title clear of the right-hand label.
-        lv_obj_set_width(r->title, OS_ROOT_W - 26 - (row.right[0] ? lv_obj_get_width(r->right) + 8 : 0));
+        lv_obj_set_width(r->title, l->w - 26 - (row.right[0] ? lv_obj_get_width(r->right) + 8 : 0));
     }
 
     lv_obj_set_hidden(l->empty, l->count > 0);
@@ -268,7 +275,7 @@ void ui_list_refresh(ui_list_t *l)
             len = 10;
         }
         lv_obj_set_size(l->scroll, 3, len);
-        lv_obj_set_pos(l->scroll, OS_ROOT_W - 4, (track - len) * l->top / (l->count - l->visible));
+        lv_obj_set_pos(l->scroll, l->w - 4, (track - len) * l->top / (l->count - l->visible));
     }
 }
 

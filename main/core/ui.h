@@ -46,7 +46,9 @@ typedef struct {
 typedef void (*ui_row_cb_t)(int index, ui_row_t *row, void *ctx);
 typedef struct ui_list ui_list_t;
 
-ui_list_t *ui_list_create(lv_obj_t *parent, int y, int h, ui_row_cb_t cb, void *ctx);
+ui_list_t *ui_list_create(lv_obj_t *parent, int y, int h, ui_row_cb_t cb, void *ctx);   // full width
+ui_list_t *ui_list_create_at(lv_obj_t *parent, int x, int y, int w, int h, ui_row_cb_t cb, void *ctx);
+// Rows are 36 px: title and sub are one line each and end in "..." when too long.
 void ui_list_set_count(ui_list_t *l, int count);   // re-renders
 void ui_list_refresh(ui_list_t *l);
 void ui_list_set_empty(ui_list_t *l, const char *text);

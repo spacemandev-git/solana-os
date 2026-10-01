@@ -38,9 +38,9 @@ static const char *TAG = "os_mesh";
 #define REASM_MS        2000            // incomplete messages are dropped after 2 s
 #define DEDUP_N         32
 #define DEDUP_MS        10000
-#define PEER_MAX        24
+#define PEER_MAX        20
 #define SUB_MAX         12
-#define RXQ_LEN         8
+#define RXQ_LEN         6
 #define HELLO_MS        1500            // + 0..1000 ms jitter
 #define MAINTAIN_MS     250
 #define SYNC_MS         1000            // identity and channel from os_cloud
@@ -48,6 +48,9 @@ static const char *TAG = "os_mesh";
 #define BEACON_TOAST_MS (10 * 60 * 1000)    // per character
 #define BEACON_GAP_MS   30000               // between any two beacon toasts
 #define ASK_TOAST_MS    15000               // per peer, swap/trade requests
+#define ASK_GAP_MS      8000                // between any two swap/trade toasts
+#define NEST_MAX        8                   // deeper JSON is dropped before anyone parses it
+#define MAC_CHANGE_N    3                   // HELLOs in a row from a new MAC before an id moves
 
 typedef struct {
     uint8_t mac[6];
@@ -86,6 +89,12 @@ static SemaphoreHandle_t s_sub_lock;    // recursive: held while handlers run
 static TaskHandle_t s_task;
 
 static os_mesh_peer_t s_peers[PEER_MAX];
+// Per entry of s_peers (same index): pinning and the MAC-change vote.
+static struct {
+    bool pinned;
+    uint8_t next_mac[6];                // a different MAC claiming this id...
+    uint8_t next_n;                     // ...in this many HELLOs in a row
+} s_meta[PEER_MAX];
 static reasm_t s_reasm[REASM_SLOTS];
 static seen_t s_seen[DEDUP_N];
 static int s_seen_next;
@@ -106,14 +115,14 @@ static bool s_log;                      // console "mesh log on"
 
 static struct {
     uint32_t tx_msgs, tx_frames, tx_err, hello_tx;
-    uint32_t rx_frames, rx_bad, rx_dup, rx_drop, rx_msgs, rx_multi, reasm_lost;
+    uint32_t rx_frames, rx_bad, rx_dup, rx_drop, rx_msgs, rx_multi, reasm_lost, rx_spoof, rx_deep;
 } s_n;
 
 static struct {
     char who[17];
     int64_t t;
 } s_toasted[8];
-static int64_t s_last_beacon_toast;
+static int64_t s_last_beacon_toast, s_last_ask_toast;
 
 static int64_t now_ms(void)
 {
@@ -300,33 +309,43 @@ static os_mesh_peer_t *find_peer_locked(const char *id)
     return NULL;
 }
 
-// The entry for id, creating it (evicting the longest silent one) if needed.
-static os_mesh_peer_t *peer_slot_locked(const char *id, bool *created)
+static bool live(const os_mesh_peer_t *p, int64_t now)
+{
+    return p->id[0] && p->last_ms && now - p->last_ms < OS_MESH_PEER_TTL_MS;
+}
+
+// The entry for id, creating it if needed. A full table (a crowded hall)
+// gives up a silent entry first, else its weakest peer if the newcomer is
+// stronger: "nearby" means close. NULL when the newcomer loses.
+static os_mesh_peer_t *peer_slot_locked(const char *id, int rssi, bool *created)
 {
     os_mesh_peer_t *p = find_peer_locked(id);
     *created = false;
     if (p) {
         return p;
     }
-    p = &s_peers[0];
-    for (int i = 0; i < PEER_MAX; i++) {
-        if (!s_peers[i].id[0]) {
-            p = &s_peers[i];
-            break;
-        }
-        if (s_peers[i].last_ms < p->last_ms) {
-            p = &s_peers[i];
+    int64_t now = now_ms();
+    os_mesh_peer_t *silent = NULL, *weak = NULL;
+    for (int i = 0; i < PEER_MAX && !p; i++) {
+        os_mesh_peer_t *q = &s_peers[i];
+        if (!q->id[0]) {
+            p = q;
+        } else if (s_meta[i].pinned) {
+            continue;                   // an app's partner: never evicted
+        } else if (!live(q, now)) {
+            silent = !silent || q->last_ms < silent->last_ms ? q : silent;
+        } else if (!weak || q->rssi < weak->rssi) {
+            weak = q;
         }
     }
-    memset(p, 0, sizeof(*p));
-    strlcpy(p->id, id, sizeof(p->id));
-    *created = true;
+    p = p ? p : silent ? silent : weak && weak->rssi < rssi ? weak : NULL;
+    if (p) {
+        memset(p, 0, sizeof(*p));
+        memset(&s_meta[p - s_peers], 0, sizeof(s_meta[0]));
+        strlcpy(p->id, id, sizeof(p->id));
+        *created = true;
+    }
     return p;
-}
-
-static bool live(const os_mesh_peer_t *p, int64_t now)
-{
-    return p->id[0] && p->last_ms && now - p->last_ms < OS_MESH_PEER_TTL_MS;
 }
 
 static int by_rssi(const void *a, const void *b)
@@ -347,6 +366,17 @@ int os_mesh_peers(os_mesh_peer_t *out, int max)
     xSemaphoreGive(s_lock);
     qsort(out, n, sizeof(*out), by_rssi);
     return n;
+}
+
+bool os_mesh_pin(const char *id, bool pin)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    os_mesh_peer_t *p = id ? find_peer_locked(id) : NULL;
+    if (p) {
+        s_meta[p - s_peers].pinned = pin;
+    }
+    xSemaphoreGive(s_lock);
+    return p != NULL;
 }
 
 bool os_mesh_peer(const char *id, os_mesh_peer_t *out)
@@ -428,7 +458,11 @@ void os_mesh_acquire(void)
         suspend = joined && !(w.state == OS_WIFI_CONNECTED && w.channel == s_channel);
         s_took_wifi = suspend;
     }
+    bool first = s_acquired == 1;
     xSemaphoreGive(s_lock);
+    if (first) {
+        os_radio_stay_awake(true);
+    }
     if (suspend) {
         ESP_LOGI(TAG, "Wi-Fi is off the mesh channel: suspending it while a mesh app runs");
         os_wifi_suspend();
@@ -438,13 +472,17 @@ void os_mesh_acquire(void)
 
 void os_mesh_release(void)
 {
-    bool resume = false;
+    bool resume = false, last = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_acquired > 0 && --s_acquired == 0) {
+        last = true;
         resume = s_took_wifi;
         s_took_wifi = false;
     }
     xSemaphoreGive(s_lock);
+    if (last) {
+        os_radio_stay_awake(false);
+    }
     if (resume) {
         os_wifi_resume();
     }
@@ -637,13 +675,39 @@ static bool app_open(const char *id)
     return app && app->id && !strcmp(app->id, id);
 }
 
-static void on_hello(const os_mesh_peer_t *heard, const char *json, int64_t now)
+// Is this HELLO from the MAC we know for its id? A live id moves to another
+// MAC only after MAC_CHANGE_N HELLOs in a row from it (one forged frame can't
+// hijack a peer), and a live beacon id never turns into a badge.
+static bool hello_mac_ok_locked(os_mesh_peer_t *p, bool created, const uint8_t *mac, bool beacon, int64_t now)
+{
+    int i = p - s_peers;
+    if (created || !live(p, now) || !memcmp(p->mac, mac, 6)) {
+        s_meta[i].next_n = 0;
+        return true;
+    }
+    if (p->kind == OS_PEER_BEACON && !beacon) {
+        return false;
+    }
+    if (memcmp(s_meta[i].next_mac, mac, 6)) {
+        memcpy(s_meta[i].next_mac, mac, 6);
+        s_meta[i].next_n = 0;
+    }
+    if (++s_meta[i].next_n < MAC_CHANGE_N) {
+        return false;
+    }
+    s_meta[i].next_n = 0;
+    return true;
+}
+
+// Only HELLOs create peers and set their MAC, kind and name. Returns false
+// when the HELLO is not accepted (then nobody hears about it).
+static bool on_hello(const os_mesh_peer_t *heard, const char *json, int64_t now)
 {
     cJSON *j = cJSON_Parse(json);
     if (!cJSON_IsObject(j)) {
         cJSON_Delete(j);
         s_n.rx_bad++;
-        return;
+        return false;
     }
     const char *k = cJSON_GetStringValue(cJSON_GetObjectItem(j, "k"));
     const char *n = cJSON_GetStringValue(cJSON_GetObjectItem(j, "n"));
@@ -652,7 +716,15 @@ static void on_hello(const os_mesh_peer_t *heard, const char *json, int64_t now)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool created;
-    os_mesh_peer_t *p = peer_slot_locked(heard->id, &created);
+    os_mesh_peer_t *p = peer_slot_locked(heard->id, heard->rssi, &created);
+    if (!p || !hello_mac_ok_locked(p, created, heard->mac, beacon, now)) {
+        if (p && !created) {
+            s_n.rx_spoof++;
+        }
+        xSemaphoreGive(s_lock);
+        cJSON_Delete(j);
+        return false;                       // table full of closer peers, or not the MAC we know
+    }
     bool fresh = created || !live(p, now);
     memcpy(p->mac, heard->mac, 6);
     p->rssi = heard->rssi;
@@ -682,6 +754,7 @@ static void on_hello(const os_mesh_peer_t *heard, const char *json, int64_t now)
     if (toast[0]) {
         os_toast("%s", toast);
     }
+    return true;
 }
 
 // "@bob wants to swap cards" / "@bob wants to trade", from any app but the one
@@ -709,15 +782,50 @@ static void maybe_ask_toast(os_mesh_type_t type, const os_mesh_peer_t *from, con
     }
     char who[17];
     snprintf(who, sizeof(who), "%s%s", xdex ? "x" : "t", from->id);
-    if (toast_due(who, ASK_TOAST_MS, now)) {
+    if (now - s_last_ask_toast > ASK_GAP_MS && toast_due(who, ASK_TOAST_MS, now)) {
+        s_last_ask_toast = now;
         os_toast("%s wants to %s", name[0] ? name : from->id, xdex ? "swap cards" : "trade");
     }
+}
+
+// cJSON parses recursively, ~80 B of stack per level: one frame of nested
+// brackets could overflow the mesh task (or any task that parses it later)
+// and reboot every badge in range. Nothing deeper than NEST_MAX gets past
+// here. Brackets inside strings don't count.
+static bool nesting_ok(const char *s, int max)
+{
+    int depth = 0;
+    bool str = false, esc = false;
+    for (; *s; s++) {
+        if (str) {
+            if (esc) {
+                esc = false;
+            } else if (*s == '\\') {
+                esc = true;
+            } else if (*s == '"') {
+                str = false;
+            }
+        } else if (*s == '"') {
+            str = true;
+        } else if (*s == '[' || *s == '{') {
+            if (++depth > max) {
+                return false;
+            }
+        } else if (*s == ']' || *s == '}') {
+            depth--;
+        }
+    }
+    return true;
 }
 
 static void deliver(uint8_t type, const uint8_t *mac, const char *src, int rssi, const char *json, int len, int frags)
 {
     int64_t now = now_ms();
     os_mesh_peer_t from = {0};
+    if (!nesting_ok(json, NEST_MAX)) {
+        s_n.rx_deep++;
+        return;
+    }
     s_n.rx_msgs++;
     if (frags > 1) {
         s_n.rx_multi++;
@@ -727,28 +835,28 @@ static void deliver(uint8_t type, const uint8_t *mac, const char *src, int rssi,
                frags == 1 ? "" : "s", rssi, json);
     }
 
-    // Who sent it. Non-HELLO senders we have no entry for yet are recorded
-    // without a HELLO time: they can be answered but are not listed.
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool created;
-    os_mesh_peer_t *p = peer_slot_locked(src, &created);
-    memcpy(p->mac, mac, 6);
-    p->rssi = rssi;
-    if (created) {
-        p->kind = type == OS_MESH_RELAY_RESP ? OS_PEER_BEACON : OS_PEER_BADGE;
-    }
-    from = *p;
-    xSemaphoreGive(s_lock);
-
     if (type == OS_MESH_HELLO) {
-        on_hello(&from, json, now);
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        os_mesh_peer_t *q = find_peer_locked(src);
-        if (q) {
-            from = *q;
+        strlcpy(from.id, src, sizeof(from.id));
+        memcpy(from.mac, mac, 6);
+        from.rssi = rssi;
+        if (!on_hello(&from, json, now)) {
+            return;
         }
-        xSemaphoreGive(s_lock);
-    } else if (type == OS_MESH_XDEX || type == OS_MESH_TRADE) {
+    }
+    // Everything else must come from the MAC a HELLO taught us for that id.
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    os_mesh_peer_t *p = find_peer_locked(src);
+    bool known = p && !memcmp(p->mac, mac, 6);
+    if (known) {
+        p->rssi = rssi;
+        from = *p;
+    }
+    xSemaphoreGive(s_lock);
+    if (!known) {
+        s_n.rx_spoof++;
+        return;
+    }
+    if (type == OS_MESH_XDEX || type == OS_MESH_TRADE) {
         maybe_ask_toast(type, &from, json, now);
     }
     dispatch(type, &from, json);
@@ -939,6 +1047,27 @@ static int selftest(void)
         fails += !ok;
         printf("%s tag %s  (%.40s%s)\n", ok ? "PASS" : "FAIL", tag, v[i].s, strlen(v[i].s) > 40 ? "..." : "");
     }
+    // A frame of nested brackets must not reach cJSON, and cJSON itself must
+    // refuse deep nesting (CJSON_NESTING_LIMIT in both builds).
+    char *deep = malloc(FRAG_DATA + 1);
+    if (deep) {
+        memset(deep, '[', FRAG_DATA);
+        deep[FRAG_DATA] = 0;
+        ok = !nesting_ok(deep, NEST_MAX) && nesting_ok("{\"k\":\"b\",\"n\":\"[[[[[[[[[[\",\"d\":[[[1]]]}", NEST_MAX);
+        fails += !ok;
+        printf("%s nesting scan drops %d nested brackets, passes brackets in strings\n", ok ? "PASS" : "FAIL", FRAG_DATA);
+        memset(deep, 0, FRAG_DATA + 1);
+        for (int i = 0; i < 40; i++) {
+            deep[i] = '[';
+            deep[79 - i] = ']';
+        }
+        cJSON *j = cJSON_Parse(deep);
+        ok = j == NULL;
+        cJSON_Delete(j);
+        fails += !ok;
+        printf("%s cJSON refuses 40 nested arrays\n", ok ? "PASS" : "FAIL");
+        free(deep);
+    }
     printf("mesh selftest: %s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
 }
@@ -958,6 +1087,8 @@ static void print_status(void)
            (unsigned long)s_n.rx_frames, (unsigned long)s_n.rx_msgs, (unsigned long)s_n.rx_multi,
            (unsigned long)s_n.rx_dup, (unsigned long)s_n.rx_bad, (unsigned long)s_n.rx_drop,
            (unsigned long)s_n.reasm_lost);
+    printf("  refused: %lu from an unknown or changed MAC, %lu nested too deep\n", (unsigned long)s_n.rx_spoof,
+           (unsigned long)s_n.rx_deep);
     printf("  mesh task stack left %u B\n", (unsigned)uxTaskGetStackHighWaterMark(s_task));
 }
 
@@ -1061,7 +1192,7 @@ void os_mesh_init(void)
     os_radio_mac(s_mac);
     os_cmd_register("mesh", "mesh [status|peers|selftest|log on|off|acquire|release|send <type> <id|*> <json>]",
                     cmd_mesh);
-    xTaskCreate(mesh_task, "mesh", 4608, NULL, 3, &s_task);
+    xTaskCreate(mesh_task, "mesh", 4096, NULL, 3, &s_task);
     esp_err_t err = os_radio_init(on_rx);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "radio unavailable: %s", esp_err_to_name(err));
