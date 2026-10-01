@@ -40,6 +40,7 @@ static char s_fin_peer[OS_MESH_ID_LEN + 1], s_fin_nonce[17], s_fin_tag[OS_MESH_T
 
 static xdex_card_t *s_ram;          // collected cards when there's no SD card
 static int s_nram;
+static char s_pinned[OS_MESH_ID_LEN + 1];   // the swap partner, kept in os_mesh's peer table
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,6 +87,7 @@ static void card_from_json(xdex_card_t *c, const char *id, const cJSON *card)
     game_ascii(c->x, sizeof(c->x), game_jstr(card, "x"));
     c->lv = game_jint(card, "lv", 0);
     c->bounty = -1;
+    c->verified = -1;
 }
 
 static cJSON *card_to_json(const xdex_card_t *c)
@@ -97,6 +99,20 @@ static cJSON *card_to_json(const xdex_card_t *c)
     return j;
 }
 
+// Pin the badge we're swapping with (one at a time); "" unpins.
+static void pin(const char *id)
+{
+    if (strcmp(id, s_pinned)) {
+        if (s_pinned[0]) {
+            os_mesh_pin(s_pinned, false);
+        }
+        strlcpy(s_pinned, id, sizeof(s_pinned));
+        if (id[0]) {
+            os_mesh_pin(id, true);
+        }
+    }
+}
+
 static void set_phase(xdex_phase_t phase, const char *peer, const char *label)
 {
     s_last.phase = phase;
@@ -104,6 +120,7 @@ static void set_phase(xdex_phase_t phase, const char *peer, const char *label)
     if (peer) {
         strlcpy(s_last.peer, peer, sizeof(s_last.peer));
     }
+    pin(phase == XDEX_ASKING || phase == XDEX_FINISHING ? s_last.peer : "");
     if (label) {
         game_peer_label(label, s_last.peer, s_last.label, sizeof(s_last.label));
     }
@@ -153,6 +170,9 @@ static void toast_result(void)
     case XDEX_UP_DONE:
         if (s_last.bounty > 0) {
             os_toast("%s's card: +%d !LAMPs", s_last.label, s_last.bounty);
+        } else if (s_last.unverified) {
+            os_toast(s_last.needs_x ? "Got %s's card. Link X on the web to earn bounties"
+                                    : "Got %s's card. No bounty: needs X on both sides", s_last.label);
         } else {
             os_toast("%s's card updated", s_last.label);
         }
@@ -195,6 +215,8 @@ static void uploaded(int status, const char *body, void *ctx)
             s_last.upload = ok ? XDEX_UP_DONE : XDEX_UP_REFUSED;
             s_last.bounty = game_jint(res, "bounty", 0);
             s_last.fresh = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(res, "new"));
+            s_last.unverified = cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(res, "verified"));
+            s_last.needs_x = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "needsX"));
             strlcpy(s_last.error, ok ? "" : game_jstr(res, "error"), sizeof(s_last.error));
             if (!ok && !s_last.error[0]) {
                 strlcpy(s_last.error, "not accepted", sizeof(s_last.error));
@@ -259,6 +281,7 @@ static void swapped(xdex_card_t *c, const char *nonce, const char *tag)
     set_phase(XDEX_SWAPPED, c->id, c->n);
     s_last.bounty = 0;
     s_last.fresh = false;
+    s_last.unverified = s_last.needs_x = false;
     s_last.error[0] = 0;
     game_led_flash(COL_PINK);
     ESP_LOGI(TAG, "collected %s (%s)", c->id, c->n);
