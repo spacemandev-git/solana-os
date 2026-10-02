@@ -18,21 +18,14 @@ static int s_sel, s_page = -1;
 static void style_tile(int slot, const os_app_t *app, bool focused)
 {
     lv_obj_t *t = s_tiles[slot];
-    if (focused) {
-        lv_obj_set_style_bg_color(t, ui_col(COL_PURPLE), 0);
-        lv_obj_set_style_bg_grad_color(t, lv_color_hex(COL_GREEN), 0);
-        lv_obj_set_style_bg_grad_dir(t, LV_GRAD_DIR_HOR, 0);
-        lv_obj_set_style_border_width(t, 0, 0);
-    } else {
-        lv_obj_set_style_bg_color(t, ui_col(COL_PANEL), 0);
-        lv_obj_set_style_bg_grad_dir(t, LV_GRAD_DIR_NONE, 0);
-        lv_obj_set_style_border_width(t, 1, 0);
-    }
+    // The focused tile is solid Solana Green, like the web's primary buttons.
+    lv_obj_set_style_bg_color(t, ui_col(focused ? COL_GREEN : COL_PANEL), 0);
+    lv_obj_set_style_border_width(t, focused ? 0 : 1, 0);
     lv_obj_set_style_text_color(s_names[slot], ui_col(focused ? COL_BG : COL_TEXT), 0);
     if (app->symbol) {
         lv_obj_set_style_text_color(s_icons[slot], ui_col(focused ? COL_BG : app->accent), 0);
     } else {
-        // A colour logo on the gradient tile is low contrast; show it as the
+        // A colour logo on the green tile is low contrast; show it as the
         // brand's solid black variant instead.
         lv_obj_set_style_image_recolor(s_icons[slot], ui_col(COL_BG), 0);
         lv_obj_set_style_image_recolor_opa(s_icons[slot], focused ? LV_OPA_COVER : LV_OPA_TRANSP, 0);

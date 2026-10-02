@@ -23,9 +23,7 @@ static void style_key(int i)
 {
     lv_obj_t *k = s_keys[i];
     bool cur = i == s_cur, done = i < s_cur;
-    lv_obj_set_style_bg_color(k, ui_col(cur ? COL_PURPLE : done ? COL_PANEL_HI : COL_PANEL), 0);
-    lv_obj_set_style_bg_grad_color(k, lv_color_hex(COL_GREEN), 0);
-    lv_obj_set_style_bg_grad_dir(k, cur ? LV_GRAD_DIR_HOR : LV_GRAD_DIR_NONE, 0);
+    lv_obj_set_style_bg_color(k, ui_col(cur ? COL_GREEN : done ? COL_PANEL_HI : COL_PANEL), 0);
     lv_obj_set_style_border_color(k, ui_col(done ? COL_GREEN : COL_BORDER), 0);
     lv_obj_set_style_text_color(lv_obj_get_child(k, 0), ui_col(cur ? COL_BG : done ? COL_GREEN : COL_DIM), 0);
 }

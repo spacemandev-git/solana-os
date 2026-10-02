@@ -30,6 +30,9 @@ int emu_display_next_ms(void);
 // ---- Radio (esp_wifi_emu.c) ----
 uint8_t emu_radio_channel(void);
 bool emu_radio_promiscuous(void);
+// While promiscuous: hand a mesh frame heard from another tab (os_radio_emu.c)
+// to the sniffer as the ESP-NOW action frame it would be on air.
+void emu_promisc_espnow(const uint8_t mac[6], const uint8_t *data, int len, int rssi);
 
 // ---- Identity (esp_emu.c) ----
 const uint8_t *emu_mac(void);       // persistent random locally-administered MAC

@@ -3,7 +3,9 @@
 // callback: ESP-NOW vendor action frames from a handful of simulated senders,
 // plus beacons as background management traffic. A frame is only heard when
 // the app is tuned to its channel, exactly like channel hopping on the badge.
-// Every sender MAC is locally administered (1A:DE:40:...): demo data.
+// Every sender MAC is locally administered (1A:DE:40:...): demo data. Mesh
+// frames from the site's other tabs (badges, beacon simulator, scanned
+// beacons) are heard too, so the Mesh tab finds them like on the badge.
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -93,6 +95,30 @@ static void send_espnow(const sender_t *s)
     f[38] = s->version;
     esp_fill_random(f + 39, s->body);
     deliver(f, len, s->rssi + (int)(esp_random() % 9) - 4);
+}
+
+void emu_promisc_espnow(const uint8_t mac[6], const uint8_t *data, int len, int rssi)
+{
+    static const uint8_t oui[3] = {0x18, 0xFE, 0x34};
+    uint8_t f[39 + 250];
+    if (!s_promisc || !s_cb || len < 1 || len > 250) {
+        return;
+    }
+    memset(f, 0, 39);
+    f[0] = 0xD0;
+    memset(f + 4, 0xFF, 6);
+    memcpy(f + 10, mac, 6);
+    memset(f + 16, 0xFF, 6);
+    f[24] = 127;
+    memcpy(f + 25, oui, 3);
+    esp_fill_random(f + 28, 4);
+    f[32] = 0xDD;
+    f[33] = len + 5;
+    memcpy(f + 34, oui, 3);
+    f[37] = 4;
+    f[38] = 1;
+    memcpy(f + 39, data, len);
+    deliver(f, 39 + len, rssi);
 }
 
 static void send_beacon(uint8_t ch)

@@ -59,6 +59,14 @@ void os_mesh_init(void);                    // after os_wifi_init() and os_cloud
 bool os_mesh_ready(void);
 int os_mesh_channel(void);                  // the channel peers are expected on
 
+// Use `channel` for the mesh instead of the one the server announced, for
+// beacons whose access point is on another channel (the ESP-NOW app's Mesh
+// tab finds them). It lasts until reboot, or until the server announces a
+// different channel; 0 goes back to the server's. Applied within a second.
+void os_mesh_set_channel(int channel);
+int os_mesh_server_channel(void);           // what the server announced, 0 before the first hello
+bool os_mesh_channel_overridden(void);
+
 // Peers heard in the last OS_MESH_PEER_TTL_MS, strongest first.
 int os_mesh_peers(os_mesh_peer_t *out, int max);
 bool os_mesh_peer(const char *id, os_mesh_peer_t *out);

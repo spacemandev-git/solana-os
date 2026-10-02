@@ -194,9 +194,7 @@ ui_list_t *ui_list_create_at(lv_obj_t *parent, int x, int y, int w, int h, ui_ro
         lv_obj_set_size(r->mark, 3, ROW_H - 8);
         lv_obj_align(r->mark, LV_ALIGN_LEFT_MID, 0, 0);
         lv_obj_set_style_bg_opa(r->mark, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(r->mark, ui_col(COL_PURPLE), 0);
-        lv_obj_set_style_bg_grad_color(r->mark, lv_color_hex(COL_GREEN), 0);
-        lv_obj_set_style_bg_grad_dir(r->mark, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_bg_color(r->mark, ui_col(COL_GREEN), 0);
         // One line each: a fixed height makes long text end in "..." instead of wrapping.
         r->title = ui_label(r->obj, &sol_font_14, COL_TEXT, "");
         lv_obj_set_pos(r->title, 10, 2);

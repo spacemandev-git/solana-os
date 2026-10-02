@@ -108,6 +108,7 @@ static char s_id[OS_MESH_ID_LEN + 1];
 static char s_label[25];
 static int s_level, s_channel;
 static bool s_has_key;
+static int s_server_ch, s_override;     // s_lock: the server's channel, and the user's choice (0 = none)
 
 static int s_acquired;
 static bool s_took_wifi;                // our acquire suspended Wi-Fi
@@ -400,6 +401,24 @@ int os_mesh_channel(void)
     return s_channel;
 }
 
+void os_mesh_set_channel(int channel)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_override = channel > 0 ? channel : 0;
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "mesh channel %s %d", channel > 0 ? "set to" : "back to the server's,", channel > 0 ? channel : s_server_ch);
+}
+
+int os_mesh_server_channel(void)
+{
+    return s_server_ch;
+}
+
+bool os_mesh_channel_overridden(void)
+{
+    return s_override != 0;
+}
+
 // The ESP-NOW scanner borrowed the radio (Wi-Fi suspended, not by us).
 static bool paused(void)
 {
@@ -430,6 +449,17 @@ static void sync_cloud(void)
     s_level = in->level;
     s_has_key = in->has_key;
     int ch = in->mesh_channel;
+    if (ch != s_server_ch) {
+        // The server moved the mesh: a channel the user picked gives way to it.
+        if (s_override && s_server_ch && ch) {
+            ESP_LOGI(TAG, "the server announced channel %d: dropping the chosen channel %d", ch, s_override);
+            s_override = 0;
+        }
+        s_server_ch = ch;
+    }
+    if (s_override) {
+        ch = s_override;
+    }
     xSemaphoreGive(s_lock);
     free(in);
     if (ch != s_channel) {
@@ -1080,6 +1110,10 @@ static void print_status(void)
            os_radio_channel(), os_mesh_ready() ? "ready" : on_channel() ? "on channel" : "off channel",
            paused() ? " (paused: radio lent out)" : "", s_has_key ? "yes" : "no", s_acquired,
            s_took_wifi ? " (Wi-Fi suspended by mesh)" : "");
+    if (s_override) {
+        printf("  channel %d chosen on the badge; the server announced %d (\"mesh channel auto\" goes back)\n", s_override,
+               s_server_ch);
+    }
     printf("  hello: '%s' Lv %d, %lu sent\n", s_label, s_level, (unsigned long)s_n.hello_tx);
     printf("  tx: %lu msgs, %lu frames, %lu errors\n", (unsigned long)s_n.tx_msgs, (unsigned long)s_n.tx_frames,
            (unsigned long)s_n.tx_err);
@@ -1169,12 +1203,14 @@ static int cmd_mesh(int argc, char **argv)
         s_log = !strcmp(argv[2], "on");
     } else if (!strcmp(sub, "send") && argc >= 5) {
         return cmd_send(argc, argv);
+    } else if (!strcmp(sub, "channel") && argc == 3) {
+        os_mesh_set_channel(strcmp(argv[2], "auto") ? atoi(argv[2]) : 0);
     } else if (!strcmp(sub, "acquire")) {
         os_mesh_acquire();
     } else if (!strcmp(sub, "release")) {
         os_mesh_release();
     } else {
-        printf("usage: mesh [status|peers|selftest|log on|off|acquire|release|send <type> <id|*> <json>|big <bytes>]\n");
+        printf("usage: mesh [status|peers|selftest|log on|off|channel <n|auto>|acquire|release|send <type> <id|*> <json>|big <bytes>]\n");
         return 1;
     }
     return 0;
@@ -1190,7 +1226,7 @@ void os_mesh_init(void)
     s_rxq = xQueueCreate(RXQ_LEN, sizeof(rx_t));
     s_msg = esp_random();                       // a quick reboot must not look like duplicates
     os_radio_mac(s_mac);
-    os_cmd_register("mesh", "mesh [status|peers|selftest|log on|off|acquire|release|send <type> <id|*> <json>]",
+    os_cmd_register("mesh", "mesh [status|peers|selftest|log on|off|channel <n|auto>|acquire|release|send <type> <id|*> <json>]",
                     cmd_mesh);
     xTaskCreate(mesh_task, "mesh", 4096, NULL, 3, &s_task);
     esp_err_t err = os_radio_init(on_rx);

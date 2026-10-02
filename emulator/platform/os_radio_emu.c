@@ -93,8 +93,12 @@ static void radio_task(void *arg)
     for (;;) {
         int n;
         while ((n = radio_js_take(os_radio_channel(), mac, buf, sizeof(buf))) > 0) {
+            int rssi = fake_rssi(mac);
+            if (emu_radio_promiscuous()) {
+                emu_promisc_espnow(mac, buf, n, rssi);
+            }
             if (s_rx) {
-                s_rx(mac, buf, n, fake_rssi(mac));
+                s_rx(mac, buf, n, rssi);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
