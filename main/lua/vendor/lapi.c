@@ -535,6 +535,44 @@ LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
 }
 
 
+/*
+** Solana OS: pushes a string of 'len' bytes that 'fill' writes (it returns
+** how many it wrote: the string's length). A long string is filled in place,
+** so a file read lands in the string with no second buffer of the same size
+** (lua_fs.c). Nothing that could run Lua code happens between creating the
+** string and filling it: allocation only ever collects in emergency mode,
+** which runs no finalizers. 'fill' must not call the Lua API.
+*/
+LUA_API const char *lua_pushfilled (lua_State *L, size_t len, lua_Fill fill,
+                                    void *ud) {
+  TString *ts;
+  char buff[LUAI_MAXSHORTLEN];
+  size_t n;
+  lua_lock(L);
+  if (len <= LUAI_MAXSHORTLEN) {  /* short strings are interned by content */
+    n = fill(ud, buff, len);
+    ts = luaS_newlstr(L, buff, n);
+  }
+  else {
+    ts = luaS_createlngstrobj(L, len);
+    n = fill(ud, getlngstr(ts), len);
+    if (n <= LUAI_MAXSHORTLEN) {  /* came out short: intern a copy */
+      memcpy(buff, getlngstr(ts), n);
+      ts = luaS_newlstr(L, buff, n);
+    }
+    else if (n < len) {
+      ts->u.lnglen = n;
+      getlngstr(ts)[n] = '\0';
+    }
+  }
+  setsvalue2s(L, L->top.p, ts);
+  api_incr_top(L);
+  luaC_checkGC(L);
+  lua_unlock(L);
+  return getstr(ts);
+}
+
+
 LUA_API const char *lua_pushstring (lua_State *L, const char *s) {
   lua_lock(L);
   if (s == NULL)

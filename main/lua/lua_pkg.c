@@ -8,9 +8,13 @@
 #include <sys/stat.h>
 #include "cJSON.h"
 #include "lvgl.h"
+#include "mbedtls/sha256.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
+#include "lua_install.h"
 #include "lua_pkg.h"
+
+#define HASH_CHUNK  1024
 
 static const char *const s_perm_names[LUA_PERM_COUNT] = {
     "led", "wifi", "mesh", "lamps", "items", "profile", "quest",
@@ -96,6 +100,95 @@ void lua_pkg_rel(char *out, size_t n, const char *id, const char *file)
     snprintf(out, n, "apps/%s/%s", id, file);
 }
 
+bool lua_pkg_valid_path(const char *path)
+{
+    size_t n = path ? strlen(path) : 0;
+    if (n == 0 || n > LUA_PKG_PATH_MAX) {
+        return false;
+    }
+    int depth = 1;
+    char prev = '/';                // the start of a segment
+    for (size_t i = 0; i < n; i++) {
+        char c = path[i];
+        if (c == '/') {
+            // No empty segment and none ending in '.'.
+            if (prev == '/' || prev == '.' || ++depth > LUA_PKG_PATH_DEPTH) {
+                return false;
+            }
+        } else if (c == '.') {
+            if (prev == '/' || prev == '.') {
+                return false;       // a leading dot, or ".."
+            }
+        } else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            return false;
+        }
+        prev = c;
+    }
+    return prev != '.' && prev != '/';
+}
+
+bool lua_pkg_file_rel(char *rel, size_t n, const char *id, const char *file, size_t *max)
+{
+    if (!lua_pkg_valid_id(id) || !file) {
+        return false;
+    }
+    if (!strcmp(file, "main.lua") || !strcmp(file, "app.json")) {
+        lua_pkg_rel(rel, n, id, file);
+        if (max) {
+            *max = file[0] == 'm' ? LUA_PKG_SRC_MAX : LUA_PKG_JSON_MAX;
+        }
+        return true;
+    }
+    if (!lua_pkg_valid_path(file)) {
+        return false;
+    }
+    snprintf(rel, n, "apps/%s/files/%s", id, file);
+    if (max) {
+        *max = LUA_PKG_FILE_MAX;
+    }
+    return true;
+}
+
+bool lua_pkg_sha256_file(const char *path, uint8_t out[32], long *size)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned char *buf = f ? malloc(HASH_CHUNK) : NULL;
+    if (!buf) {
+        if (f) {
+            fclose(f);
+        }
+        return false;
+    }
+    mbedtls_sha256_context c;
+    mbedtls_sha256_init(&c);
+    mbedtls_sha256_starts(&c, 0);
+    long total = 0;
+    size_t got;
+    while ((got = fread(buf, 1, HASH_CHUNK, f)) > 0) {
+        mbedtls_sha256_update(&c, buf, got);
+        total += got;
+    }
+    bool ok = !ferror(f);
+    mbedtls_sha256_finish(&c, out);
+    mbedtls_sha256_free(&c);
+    fclose(f);
+    free(buf);
+    if (size) {
+        *size = total;
+    }
+    return ok;
+}
+
+void lua_pkg_hex(char *out, const uint8_t *bin, size_t n)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[2 * i] = hex[bin[i] >> 4];
+        out[2 * i + 1] = hex[bin[i] & 15];
+    }
+    out[2 * n] = 0;
+}
+
 // Manifest text shows in titles, lists and dialogs: drop control characters
 // (a newline in a name must not add a line anywhere), and don't cut a UTF-8
 // character in half.
@@ -149,6 +242,12 @@ bool lua_pkg_parse(const char *json, const char *want_id, lua_pkg_t *out)
     cJSON_ArrayForEach(perm, cJSON_GetObjectItemCaseSensitive(m, "permissions")) {
         out->perms |= cJSON_IsString(perm) ? lua_perm_parse(perm->valuestring) : 0;
     }
+    const cJSON *files = cJSON_GetObjectItemCaseSensitive(m, "files");
+    const cJSON *bytes = cJSON_GetObjectItemCaseSensitive(m, "filesSize");
+    out->files = cJSON_IsNumber(files) && files->valuedouble > 0 && files->valuedouble <= LUA_PKG_FILES_MAX
+                 ? (int)files->valuedouble : 0;
+    out->files_size = cJSON_IsNumber(bytes) && bytes->valuedouble > 0 && bytes->valuedouble <= LUA_PKG_FILES_TOTAL
+                      ? (int32_t)bytes->valuedouble : 0;
     out->temp = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "temp"));
     const cJSON *exp = cJSON_GetObjectItemCaseSensitive(m, "expires");
     out->expires = cJSON_IsNumber(exp) ? (int64_t)exp->valuedouble : 0;
@@ -185,6 +284,7 @@ int lua_pkg_scan(lua_pkg_t *out, int max)
     if (!os_data_ready()) {
         return -1;
     }
+    lua_install_recover();          // an update cut off mid-swap
     char path[160];
     os_data_path(path, sizeof(path), "apps");
     DIR *d = opendir(path);
@@ -206,7 +306,7 @@ int lua_pkg_scan(lua_pkg_t *out, int max)
 bool lua_pkg_remove(const char *id)
 {
     char rel[40];
-    if (!lua_pkg_valid_id(id)) {
+    if (!lua_pkg_valid_id(id) || lua_install_busy(id)) {
         return false;
     }
     snprintf(rel, sizeof(rel), "apps/%s", id);

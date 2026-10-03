@@ -12,6 +12,9 @@
 
 static const char *TAG = "os_data";
 
+#define REMOVE_PATH     256             // the longest path a removal walks
+#define REMOVE_DEPTH    12              // folders deeper than this are left alone
+
 bool os_data_ready(void)
 {
     bsp_sd_info_t sd;
@@ -115,6 +118,38 @@ bool os_data_append(const char *rel, const char *line)
     return fclose(f) == 0 && ok;
 }
 
+// Empties the folder at path (a buffer of cap bytes it extends and restores)
+// and removes it. Each level costs a few words of stack, since apps' bundled
+// folders nest a few deep and a wipe walks all of OS_DATA_DIR: one path
+// buffer for the whole walk, and readdir's d_type instead of a stat per entry.
+static bool remove_dir(char *path, size_t cap, int depth)
+{
+    DIR *d = opendir(path);
+    if (!d) {
+        return false;
+    }
+    size_t len = strlen(path);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t n = strlen(e->d_name);
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || len + 1 + n >= cap) {
+            continue;
+        }
+        path[len] = '/';
+        memcpy(path + len + 1, e->d_name, n + 1);
+        if (e->d_type == DT_DIR) {
+            if (depth < REMOVE_DEPTH) {
+                remove_dir(path, cap, depth + 1);
+            }
+        } else {
+            unlink(path);
+        }
+        path[len] = 0;
+    }
+    closedir(d);
+    return rmdir(path) == 0;
+}
+
 static bool remove_tree(const char *path)
 {
     struct stat st;
@@ -124,21 +159,10 @@ static bool remove_tree(const char *path)
     if (!S_ISDIR(st.st_mode)) {
         return unlink(path) == 0;
     }
-    DIR *d = opendir(path);
-    if (d) {
-        struct dirent *e;
-        char child[256];
-        while ((e = readdir(d))) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) {
-                continue;
-            }
-            if (snprintf(child, sizeof(child), "%s/%s", path, e->d_name) < (int)sizeof(child)) {
-                remove_tree(child);
-            }
-        }
-        closedir(d);
-    }
-    return rmdir(path) == 0;
+    char *buf = malloc(REMOVE_PATH);
+    bool ok = buf && strlcpy(buf, path, REMOVE_PATH) < REMOVE_PATH && remove_dir(buf, REMOVE_PATH, 0);
+    free(buf);
+    return ok;
 }
 
 bool os_data_remove(const char *rel)

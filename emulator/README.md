@@ -42,7 +42,7 @@ firmware/emulator/
 | `core/os_wifi.c` | ESP-IDF Wi-Fi STA, off at boot, parks the radio on the mesh channel | `platform/os_wifi_emu.c`: demo networks, joining always works, fake IP, same NVS keys, same off-at-boot and channel rules |
 | `core/os_http.c` | esp_http_client (requests and streamed downloads) | `platform/os_http_emu.c`: `fetch()` against the page's origin; downloads land in the emulated SD card |
 | `core/os_radio.c` (mesh) | ESP-NOW | `platform/os_radio_emu.c`: `BroadcastChannel("solana-os-mesh")` between tabs of one origin (docs/MESH.md "Emulator transport"), on the emulated radio's channel |
-| `core/console.c` | UART REPL | `platform/console_emu.c`: `emu_console("open wifi")` from the page |
+| `core/console.c` | UART REPL (`console_stream_read()` takes `lua recv`'s stream) | `platform/console_emu.c`: `emu_console("open wifi")` from the page; no stream, so the page writes app files into MEMFS instead |
 | `bsp_display.c` | ILI9341 + esp_lvgl_port | `bsp_display_emu.c`: 2 x 320x24 partial buffers, RGBA framebuffer for a `<canvas>` |
 | `bsp_buttons.c` | TCA9534 + BOOT, button task | `bsp_buttons_emu.c`: page sets the raw lines, same task/callback shape |
 | `bsp_rgb.c` | WS2812 via RMT | `bsp_rgb_emu.c`: shown colours read by the page |
@@ -50,6 +50,7 @@ firmware/emulator/
 | `bsp_sd.c` | SPI microSD + FatFs | `bsp_sd_emu.c`: 64 MB card in MEMFS (stdio/dirent work, `readdir` hides `.`/`..` like FatFs) |
 | promiscuous Wi-Fi (`espnow_app.c`) | real radio | `esp_wifi_emu.c`: real 802.11 vendor action frames on the tuned channel |
 | NVS | flash | `esp_emu.c`: localStorage (`solana-os-emu:nvs`, or `solana-os-emu:<n>:nvs` with `?badge=<n>`) |
+| mbedtls base64, SHA-256 | ESP-IDF's mbedtls (SHA in hardware) | `esp_emu.c` behind `shim/mbedtls/*.h` (the installer and `lua sums` hash files) |
 
 Values the firmware prints are honest: ESP-IDF version "browser emulator", a
 random locally administered MAC (kept in localStorage), wasm heap figures.

@@ -4,10 +4,9 @@
 //
 // The list's first rows are controls (search, sort, updates); LEFT/RIGHT
 // picks the category. Pages of 10 load as the selection reaches the end.
-// Installing downloads main.lua (os_api_download writes a .part file and
-// renames it) and then writes app.json from the X-App-Manifest header. A
-// download keeps going if the store is closed: its answer only touches the
-// card unless the store is still open.
+// Installing hands the app to lua_install (main.lua, app.json and the
+// bundled files, swapped in together once they're all on the card), which
+// keeps going if the store is closed; on_tick follows its progress.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +20,9 @@
 #include "core/os_cloud.h"
 #include "core/os_data.h"
 #include "core/ui.h"
+#include "game/quests.h"
 #include "lua/lua_host.h"
+#include "lua/lua_install.h"
 #include "lua/lua_pkg.h"
 
 #define ENTRIES_MAX     50
@@ -53,6 +54,7 @@ typedef struct {
     char category[8];
     uint32_t perms;
     int installs, ratings, rating10;    // rating × 10, -1 = none
+    int size;                           // bytes of main.lua and the bundled files
 } detail_t;
 
 enum { CTRL_SEARCH, CTRL_SORT, CTRL_UPDATES };
@@ -70,11 +72,12 @@ static int s_inbox_n = -1;
 static char s_job_rm[4][LUA_PKG_ID_MAX + 1];
 
 // Requests, by os_api_token(): each kind keeps only its newest request (the
-// one before is cancelled). The download survives closing the store.
-enum { REQ_LIST, REQ_LIB, REQ_DETAIL, REQ_BUY, REQ_DL, REQ_KINDS };
+// one before is cancelled).
+enum { REQ_LIST, REQ_LIB, REQ_DETAIL, REQ_BUY, REQ_KINDS };
 static void *s_req[REQ_KINDS];          // live request per kind, NULL = none
 static bool s_reask;                    // the price changed: ask again once details reload
-static char s_dl_id[LUA_PKG_ID_MAX + 1], s_dl_name[21];
+static uint32_t s_inst_seq;             // the last install end the store has taken in
+static int s_inst_done = -1;            // files the action line shows as done
 
 static void *req_new(int kind)
 {
@@ -154,6 +157,18 @@ static const char *installed_version(const char *id)
 {
     const ver_t *v = installed(id);
     return v ? v->version : NULL;
+}
+
+static const char *size_text(char *out, size_t n, int bytes)
+{
+    if (bytes < 1024) {
+        snprintf(out, n, "%d B", bytes);
+    } else if (bytes < 1024 * 1024) {
+        snprintf(out, n, "%d KB", (bytes + 512) / 1024);
+    } else {
+        snprintf(out, n, "%d.%d MB", bytes / (1024 * 1024), bytes % (1024 * 1024) * 10 / (1024 * 1024));
+    }
+    return out;
 }
 
 static void price_text(char *out, size_t n, int price, bool owned)
@@ -423,8 +438,15 @@ static void render_action(void)
     const entry_t *e = &s_detail->e;
     char t[64], price[24];
     const char *have = installed_version(e->id);
-    if (s_req[REQ_DL] && !strcmp(s_dl_id, e->id)) {
-        strlcpy(t, "Installing...", sizeof(t));
+    lua_install_info_t in;
+    lua_install_get(&in);
+    if (in.state == LUA_INSTALL_RUNNING && !strcmp(in.id, e->id)) {
+        if (in.files_total > 0) {
+            snprintf(t, sizeof(t), "Installing... %d/%d files", in.files_done, in.files_total);
+        } else {
+            strlcpy(t, "Installing...", sizeof(t));
+        }
+        s_inst_done = in.files_done;
     } else if (s_req[REQ_BUY]) {
         strlcpy(t, "Buying...", sizeof(t));
     } else if (have && strcmp(have, e->version)) {
@@ -459,13 +481,14 @@ static void show_detail(void)
     detail_t *d = s_detail;
     lv_obj_t *box = s_detail_box;
     lv_obj_clean(box);
-    char line[96];
+    char line[96], size[16];
     lv_obj_t *t = ui_label(box, &sol_font_20, COL_TEXT, "");
     lv_label_set_text_fmt(t, "%s  %s", d->e.symbol, d->e.name);
     lv_obj_set_pos(t, 10, 4);
     lv_obj_set_width(t, OS_ROOT_W - 20);
     lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
-    snprintf(line, sizeof(line), "v%s  by %s", d->e.version, d->author[0] ? d->author : "?");
+    snprintf(line, sizeof(line), "v%s  by %s  " LV_SYMBOL_BULLET "  %s", d->e.version, d->author[0] ? d->author : "?",
+             size_text(size, sizeof(size), d->size));
     lv_obj_t *m = ui_label(box, &sol_mono_12, COL_DIM, line);
     lv_obj_set_pos(m, 10, 32);
     char num[16];
@@ -542,6 +565,7 @@ static void detail_cb(int status, const char *body, void *ctx)
     d->e.owned = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "owned"));
     d->installs = jint(j, "installs", 0);
     d->ratings = jint(j, "ratings", 0);
+    d->size = jint(j, "size", 0) + jint(j, "filesSize", 0);
     const cJSON *rating = cJSON_GetObjectItemCaseSensitive(j, "rating");
     d->rating10 = cJSON_IsNumber(rating) ? (int)(rating->valuedouble * 10 + 0.5) : -1;
     const cJSON *author = cJSON_GetObjectItemCaseSensitive(j, "author");
@@ -598,87 +622,50 @@ static void open_detail(const char *id)
     fetch_detail();
 }
 
-// Download answer: body is the decoded X-App-Manifest. Runs even after the
-// store closed (the request isn't cancelled), then touches only the card.
-static void download_cb(int status, const char *body, void *ctx)
+// The store's lists after an install ended: the new version, no update offered.
+static void note_installed(const char *id, const char *version)
 {
-    if (ctx != s_req[REQ_DL]) {
-        return;
+    int i = 0;
+    while (s_installed && i < s_installed_n && strcmp(s_installed[i].id, id)) {
+        i++;
     }
-    s_req[REQ_DL] = NULL;
-    char rel[64];
-    lua_pkg_t pkg;
-    bool ok = status == 200 && body && lua_pkg_parse(body, s_dl_id, &pkg);
-    if (ok) {
-        lua_pkg_rel(rel, sizeof(rel), s_dl_id, "app.json");
-        ok = os_data_write(rel, body, strlen(body));
-    }
-    if (!ok) {
-        if (status == 0) {
-            os_toast("Download failed. Check Wi-Fi and the card");
-        } else if (status == 403) {
-            os_toast("You don't own this app");
-        } else {
-            os_toast("Download failed (%d)", status);
-        }
-        lua_pkg_rel(rel, sizeof(rel), s_dl_id, "main.lua");
-        if (status == 200 && !lua_pkg_load(s_dl_id, &pkg)) {
-            os_data_remove(rel);            // a new main.lua without any manifest
-        }
-    } else {
-        os_toast("Installed %s", s_dl_name);
-    }
-    if (!s_open) {
-        return;
-    }
-    if (ok) {
-        // Note the new version without rescanning the card.
-        int i = 0;
-        while (i < s_installed_n && strcmp(s_installed[i].id, pkg.id)) {
-            i++;
-        }
-        if (i < INSTALLED_MAX && s_installed) {
-            strlcpy(s_installed[i].id, pkg.id, sizeof(s_installed[i].id));
-            strlcpy(s_installed[i].version, pkg.version, sizeof(s_installed[i].version));
-            strlcpy(s_installed[i].name, pkg.name, sizeof(s_installed[i].name));
-            if (i == s_installed_n) {
-                s_installed_n++;
+    if (s_installed && i < INSTALLED_MAX) {
+        ver_t *v = &s_installed[i];
+        if (i == s_installed_n) {
+            const char *name = s_detail && !strcmp(s_detail->e.id, id) ? s_detail->e.name : "";
+            for (int k = 0; !name[0] && k < s_n; k++) {
+                name = !strcmp(s_entries[k].id, id) ? s_entries[k].name : "";
             }
+            strlcpy(v->id, id, sizeof(v->id));
+            strlcpy(v->name, name, sizeof(v->name));
+            s_installed_n++;
         }
-        for (int u = 0; u < s_updates_n; u++) {
-            if (!strcmp(s_updates[u].id, pkg.id)) {
-                s_updates[u] = s_updates[--s_updates_n];
-                break;
-            }
-        }
+        strlcpy(v->version, version, sizeof(v->version));
     }
-    if (s_detail) {
-        render_action();
-    } else if (!s_kb) {
-        render_list();
+    for (int u = 0; u < s_updates_n; u++) {
+        if (!strcmp(s_updates[u].id, id)) {
+            s_updates[u] = s_updates[--s_updates_n];
+            break;
+        }
     }
 }
 
 static void install(const entry_t *e)
 {
-    char rel[64], path[160], src[80];
     if (!os_data_ready()) {
         os_toast("Insert a microSD card");
         return;
     }
-    if (s_req[REQ_DL]) {
-        os_toast("Still installing %s", s_dl_name);
+    const quest_download_t *q = quests_download();
+    if (q->state == QDL_RUNNING && !strcmp(q->id, e->id)) {
+        os_toast("A quest is delivering %s", e->name);
         return;
     }
-    lua_pkg_rel(rel, sizeof(rel), e->id, "main.lua");
-    os_data_mkdirs(rel);
-    os_data_path(path, sizeof(path), rel);
-    snprintf(src, sizeof(src), "/api/device/apps/%s/source", e->id);
-    strlcpy(s_dl_id, e->id, sizeof(s_dl_id));
-    strlcpy(s_dl_name, e->name, sizeof(s_dl_name));
-    if (os_api_download(src, path, LUA_PKG_SRC_MAX, download_cb, req_new(REQ_DL)) != ESP_OK) {
-        s_req[REQ_DL] = NULL;
-        os_toast("Can't reach the server");
+    esp_err_t err = lua_install_start(e->id, e->name);
+    if (err == ESP_ERR_INVALID_STATE) {
+        os_toast("Another app is still installing");
+    } else if (err != ESP_OK) {
+        os_toast("Not enough memory to install it");
     }
     render_action();
 }
@@ -751,7 +738,7 @@ static void buy_confirmed(bool yes, void *ctx)
 static void detail_select(void)
 {
     const entry_t *e = &s_detail->e;
-    if (!e->version[0] || s_req[REQ_BUY] || (s_req[REQ_DL] && !strcmp(s_dl_id, e->id))) {
+    if (!e->version[0] || s_req[REQ_BUY] || lua_install_busy(e->id)) {
         return;                 // still loading, or busy
     }
     const char *have = installed_version(e->id);
@@ -784,6 +771,9 @@ static void enter(lv_obj_t *root)
     s_err = s_entries && s_installed && s_updates ? NULL : "Not enough memory";
     s_detail = NULL;
     s_kb = NULL;
+    lua_install_info_t in;
+    lua_install_get(&in);
+    s_inst_seq = in.seq;                // installs that ended before are on the card already
 
     lv_obj_t *head = lv_obj_create(root);
     lv_obj_remove_style_all(head);
@@ -814,7 +804,7 @@ static void leave(void)
     free(s_inbox);
     s_inbox = NULL;
     xSemaphoreGive(s_mx);
-    // The download, if any, goes on: its answer writes app.json.
+    // An install, if any, goes on (lua_install).
     req_cancel(REQ_LIST);
     req_cancel(REQ_LIB);
     req_cancel(REQ_DETAIL);
@@ -849,6 +839,21 @@ static void tick(void)
         } else if (!s_kb) {
             render_list();
         }
+    }
+    lua_install_info_t inst;
+    lua_install_get(&inst);
+    if (inst.seq != s_inst_seq) {
+        s_inst_seq = inst.seq;
+        if (inst.state == LUA_INSTALL_DONE) {
+            note_installed(inst.id, inst.version);
+        }
+        if (s_detail) {
+            render_action();
+        } else if (!s_kb) {
+            render_list();
+        }
+    } else if (inst.state == LUA_INSTALL_RUNNING && s_detail && inst.files_done != s_inst_done) {
+        render_action();                // the next file is done
     }
     bool was_hidden = lv_obj_is_hidden(s_offline);
     bool online = ui_offline_update(s_offline) == UI_NET_OK;

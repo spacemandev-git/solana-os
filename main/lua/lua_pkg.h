@@ -1,8 +1,9 @@
 #pragma once
 
 // Installed Lua apps on the microSD card (docs/LUA_API.md "The package"):
-// /sdcard/hh/apps/<id>/{main.lua, app.json, data.json}. Shared by the host,
-// the Apps library, the App Store and the console.
+// /sdcard/hh/apps/<id>/{main.lua, app.json, data.json} and the bundled files
+// under files/. Shared by the host, the installer, the Apps library, the App
+// Store and the console.
 //
 // Reading one manifest is a small file read (fine from app callbacks);
 // scanning or removing directories blocks longer and belongs in a worker task.
@@ -14,6 +15,12 @@
 #define LUA_PKG_ID_MAX      24
 #define LUA_PKG_SRC_MAX     (64 * 1024)     // main.lua
 #define LUA_PKG_JSON_MAX    2048            // app.json
+// Bundled files: the store's limits (server/API.md), checked again here.
+#define LUA_PKG_FILES_MAX   64
+#define LUA_PKG_FILE_MAX    (256 * 1024)
+#define LUA_PKG_FILES_TOTAL (1024 * 1024)
+#define LUA_PKG_PATH_MAX    64              // "lib/quiz.lua"
+#define LUA_PKG_PATH_DEPTH  4
 
 typedef enum {
     LUA_PERM_LED = 1 << 0,
@@ -37,12 +44,30 @@ typedef struct {
     const char *symbol;     // LV_SYMBOL_* for the manifest's icon
     uint32_t accent;        // 0xRRGGBB
     uint32_t perms;         // lua_perm_t bits
+    int files;              // bundled files, as the manifest says
+    int32_t files_size;     // their bytes
     bool temp;
     int64_t expires;        // unix ms, 0 = never
 } lua_pkg_t;
 
 // ^[a-z0-9-]{3,24}$ (the store's rule); also keeps ids safe in paths.
 bool lua_pkg_valid_id(const char *id);
+
+// A bundled file's path (LUA_API.md "The package"): lowercase segments of
+// [a-z0-9_-] with single dots inside, '/' between them, at most
+// LUA_PKG_PATH_MAX characters and LUA_PKG_PATH_DEPTH levels. Nothing else can
+// leave the app's files/ folder.
+bool lua_pkg_valid_path(const char *path);
+
+// A file of app <id> as the console and the installer name it: "main.lua"
+// and "app.json" are the app's own, any other valid path is a bundled file
+// (apps/<id>/files/<path>). Fills `rel` (relative to OS_DATA_DIR) and the
+// size limit; false for an invalid name.
+bool lua_pkg_file_rel(char *rel, size_t n, const char *id, const char *file, size_t *max);
+
+// SHA-256 of a file (a full path), and its size. false if it can't be read.
+bool lua_pkg_sha256_file(const char *path, uint8_t out[32], long *size);
+void lua_pkg_hex(char *out, const uint8_t *bin, size_t n);     // out: 2n + 1 bytes
 
 // Parse a manifest. false if it isn't valid JSON or lacks a valid id. With
 // want_id, the manifest's id must match it.
@@ -54,7 +79,8 @@ bool lua_pkg_load(const char *id, lua_pkg_t *out);
 // Installed apps sorted by name; returns the count (≤ max), -1 without a card.
 int lua_pkg_scan(lua_pkg_t *out, int max);
 
-// Delete apps/<id>/ (blocking: directory walk).
+// Delete apps/<id>/ (blocking: directory walk). false while the store
+// installs that app.
 bool lua_pkg_remove(const char *id);
 
 // Temporary app past its expiry by the server clock. Unknown time = not expired.

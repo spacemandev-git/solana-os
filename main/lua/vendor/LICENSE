@@ -8,7 +8,8 @@ luai_cstackfull() hooks the host's native C stack guard, which ldo.c
 (ccall) and lstate.c (luaE_incCstack, luaE_checkcstack) also check, and
 luai_userstatethread arms the count hook on new coroutines. lstrlib.c
 charges pattern matching and plain find work to the host's instruction
-budget (luai_patternsteps).
+budget (luai_patternsteps). lapi.c adds lua_pushfilled (declared in lua.h),
+a string filled in place, so file reads need no second buffer.
 
 Copyright (C) 1994-2026 Lua.org, PUC-Rio.
 

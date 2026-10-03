@@ -51,6 +51,12 @@ static void cmd_wifi(int argc, char **argv)
            in.ip, in.rssi, in.channel, in.fail_reason ? in.fail_reason : "");
 }
 
+// Commands arrive as whole lines from the page: nothing streams after them.
+int console_stream_read(void *buf, size_t n, int timeout_ms)
+{
+    return -1;
+}
+
 EMSCRIPTEN_KEEPALIVE void emu_console(const char *line)
 {
     // Split like the badge's esp_console: spaces separate words, "double

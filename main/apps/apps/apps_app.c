@@ -19,6 +19,7 @@
 #include "core/os_cloud.h"
 #include "core/ui.h"
 #include "lua/lua_host.h"
+#include "lua/lua_install.h"
 #include "lua/lua_pkg.h"
 
 #define APPS_MAX        40
@@ -201,6 +202,11 @@ static void show_info(const lua_pkg_t *p)
         lv_obj_t *s = ui_label(s_info, &sol_font_14, COL_TEXT, p->summary);
         lv_obj_set_width(s, lv_pct(100));
     }
+    if (p->files > 0) {
+        int kb = (p->files_size + 1023) / 1024;
+        snprintf(line, sizeof(line), "%d bundled file%s, %d KB", p->files, p->files == 1 ? "" : "s", kb);
+        ui_label(s_info, &sol_mono_12, COL_DIM, line);
+    }
     lv_obj_t *h = ui_label(s_info, &sol_mono_12, COL_DIM, p->perms ? "It can:" : "It needs no permissions.");
     lv_obj_set_style_pad_top(h, 6, 0);
     for (int b = 0; b < LUA_PERM_COUNT; b++) {
@@ -324,6 +330,10 @@ static bool key(os_key_t k, bool repeat)
         return true;
     case OS_KEY_LEFT:
         if (!arming) {
+            return true;
+        }
+        if (lua_install_busy(s_pkgs[sel].id)) {
+            os_toast("%s is still installing", s_pkgs[sel].name);
             return true;
         }
         if (s_rm_index == sel) {

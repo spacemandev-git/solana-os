@@ -38,6 +38,7 @@
 static const char *TAG = "os_api";
 
 #define QUEUE_MAX       8               // requests waiting for the worker
+#define URL_MAX         320             // origin + a bundled file's path and version
 #define BODY_MAX        4096            // API.md: request bodies are <= 4 KB
 #define MANIFEST_B64    2048            // X-App-Manifest header, base64
 #define OUTBOX_FILE     "outbox.jsonl"
@@ -285,7 +286,7 @@ static void run_download(req_t *r, const char *url, const char *bearer)
 
 static void run(req_t *r, bool online)
 {
-    char url[192], bearer[96];
+    char url[URL_MAX], bearer[96];
     if (!online || !os_cloud_bearer(bearer, sizeof(bearer))) {
         return;                             // status 0
     }

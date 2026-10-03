@@ -27,5 +27,9 @@ bool lua_host_launch(const char *id);
 // Id of the running app, or NULL.
 const char *lua_host_running(void);
 
+// A Lua task for app <id> exists: running, showing its error screen or still
+// closing. Its files are in use until this turns false. Any task.
+bool lua_host_active(const char *id);
+
 // Registers the "lua" console command. Call before console_start().
 void lua_host_init(void);

@@ -33,6 +33,7 @@
 #include "core/os_data.h"
 #include "core/os_http.h"
 #include "vendor/lualib.h"
+#include "lua_install.h"
 #include "lua_priv.h"
 
 static const char *TAG = "lua";
@@ -46,7 +47,6 @@ static const char *TAG = "lua";
 #define LH_EXIT_WAIT_MS     2000
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
-#define LH_READ_CHUNK       256
 #define LH_PREWARM_MS       4000        // longest wait for the server connection at launch
 #define LH_SERVER_PERMS     (LUA_PERM_LAMPS | LUA_PERM_ITEMS | LUA_PERM_PROFILE | LUA_PERM_QUEST)
 
@@ -60,6 +60,7 @@ static uint32_t s_gen;
 static lua_pkg_t s_next;            // app to start on the next enter (under lh_mx)
 static char s_title[21] = "Lua";
 static bool s_busy;                 // a lua task exists (under lh_mx)
+static char s_task_id[LUA_PKG_ID_MAX + 1];  // ... running this app (under lh_mx)
 
 // Native C stack guard (vendor/luaconf.h luai_cstackfull): Lua asks before
 // every new C level. The leaf work under a level (LVGL, printf, JSON, pattern
@@ -205,6 +206,7 @@ static void close_state(lh_t *s)
     s->steps = 0;
     lua_close(s->L);
     s->L = NULL;
+    lh_fs_close(s);
 }
 
 // The script failed with rc and its error on the stack (or in msg_in).
@@ -214,6 +216,12 @@ static void fail(lh_t *s, int rc, const char *msg_in)
     lua_State *L = s->L;
     char msg[200];
     const char *title = "Script error";
+    // A memory error that went through pcall (require, or the script's own)
+    // comes back as a plain error with Lua's message.
+    if (rc != LUA_ERRMEM && s->mem_hit && lua_type(L, -1) == LUA_TSTRING
+            && !strcmp(lua_tostring(L, -1), "not enough memory")) {
+        rc = LUA_ERRMEM;
+    }
     if (rc == LUA_ERRMEM) {
         title = "Out of memory";
         snprintf(msg, sizeof(msg), s->mem_hit ? "The app needs more than %d KB." : "The badge is low on memory.",
@@ -347,6 +355,7 @@ static int boot(lua_State *L)
     lh_open_sys(L);
     lh_open_json(L);
     lh_open_net(L);
+    lh_open_fs(L);
     lh_storage_load(lh_get(L));
 
     int rc = lua_load(L, read_chunk, lua_touserdata(L, 1), "=main.lua", "t");
@@ -487,6 +496,7 @@ static void task_end(lh_t *s)
     s->finished = true;
     bool orphan = s->orphan;
     s_busy = false;
+    s_task_id[0] = 0;
     xSemaphoreGive(lh_mx);
     if (orphan) {
         // The OS gave up waiting and left the session to us.
@@ -639,6 +649,7 @@ static void host_enter(lv_obj_t *root)
     xSemaphoreTake(lh_mx, portMAX_DELAY);
     lh_cur = s;
     s_busy = true;
+    strlcpy(s_task_id, pkg.id, sizeof(s_task_id));
     xSemaphoreGive(lh_mx);
     if (pkg.perms & LUA_PERM_MESH) {
         lh_mesh_start(s);
@@ -646,6 +657,7 @@ static void host_enter(lv_obj_t *root)
     if (xTaskCreate(lua_task, "lua", LH_STACK, s, LH_PRIO, &s->task) != pdPASS) {
         xSemaphoreTake(lh_mx, portMAX_DELAY);
         s_busy = false;
+        s_task_id[0] = 0;
         s->finished = true;
         xSemaphoreGive(lh_mx);
         s->failed = true;
@@ -709,6 +721,8 @@ bool lua_host_launch(const char *id)
     const char *why = NULL;
     if (!os_data_ready()) {
         why = "Insert a microSD card";
+    } else if (lua_install_busy(id)) {
+        why = "That app is still installing";
     } else if (!lua_pkg_load(id, &pkg)) {
         why = "That app isn't installed";
     } else if (lua_pkg_expired(&pkg)) {
@@ -741,10 +755,19 @@ const char *lua_host_running(void)
     return s && !s->failed ? s->pkg.id : NULL;
 }
 
+bool lua_host_active(const char *id)
+{
+    xSemaphoreTake(lh_mx, portMAX_DELAY);
+    bool active = s_busy && id && !strcmp(s_task_id, id);
+    xSemaphoreGive(lh_mx);
+    return active;
+}
+
 void lua_host_init(void)
 {
     lh_mx = xSemaphoreCreateMutex();
     s_done = xSemaphoreCreateBinary();
     s_q = xQueueCreate(LH_QUEUE_LEN, sizeof(lh_ev_t));
+    lua_install_init();
     lh_cmd_register();
 }

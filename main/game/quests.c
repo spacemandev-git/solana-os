@@ -22,6 +22,7 @@
 #include "core/os_cloud.h"
 #include "core/os_cmd.h"
 #include "core/os_data.h"
+#include "lua/lua_install.h"
 #include "quests.h"
 
 static const char *TAG = "quests";
@@ -336,6 +337,10 @@ static void dl_start(const char *app, const char *beacon)
     }
     if (!app_replaceable(app)) {
         dl_fail("an app with that name is installed");
+        return;
+    }
+    if (lua_install_busy(app)) {
+        dl_fail("the App Store is installing it");
         return;
     }
     char rel[64];

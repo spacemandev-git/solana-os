@@ -9,6 +9,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -35,6 +36,11 @@
 #define LH_CALLS_SENT       3           // at once in os_api, whose queue the OS shares
 #define LH_JSON_DEPTH       16          // nesting; bounds the decoder's recursion
 #define LH_LED_COUNT        8
+#define LH_FS_READ_MAX      (16 * 1024) // fs.read / fs.json per call
+#define LH_FS_LINE_MAX      512         // fs.lines: longer lines come in pieces
+#define LH_FS_OPEN_STEPS    500         // budget per file opened ...
+#define LH_FS_BYTES_PER_STEP 4          // ... and per bytes read or compiled
+#define LH_READ_CHUNK       256         // compiling from the card, a piece at a time
 
 typedef enum { LH_LABEL, LH_RECT, LH_BAR, LH_GRADIENT, LH_LIST, LH_KIND_COUNT } lh_kind_t;
 
@@ -114,6 +120,11 @@ typedef struct lh {
     int timer_seq;
     int64_t next_tick;
 
+    // fs: the last file read stays open (lua_fs.c)
+    FILE *fs_file;
+    long fs_size;
+    char fs_path[LUA_PKG_PATH_MAX + 1];
+
     // storage.*
     int store_ref;
     char *store_pending;        // encoded data.json waiting to be written
@@ -188,6 +199,10 @@ int64_t lh_timers_next(lh_t *s);                        // earliest due time, or
 void lh_timers_run(lh_t *s);
 bool lh_storage_load(lh_t *s);
 void lh_storage_flush(lh_t *s, bool force);
+
+// lua_fs.c: fs and require
+void lh_open_fs(lua_State *L);
+void lh_fs_close(lh_t *s);                              // the cached file, when the app stops
 
 // lua_net.c: mesh, lamps, items, profile, quest
 void lh_open_net(lua_State *L);

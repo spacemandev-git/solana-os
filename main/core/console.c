@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_console.h"
+#include "driver/uart.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -297,11 +298,11 @@ static int cmd_heap(int argc, char **argv)
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
     if (argc > 1 && !strcmp(argv[1], "stacks")) {
         // Bytes each task has never touched since boot (its worst case so far).
-        static const char *const names[] = {"taskLVGL", "os", "mesh", "cloud", "lua"};
+        static const char *const names[] = {"taskLVGL", "os", "mesh", "cloud", "lua", "console_repl", "lua_inst"};
         for (int i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
             TaskHandle_t t = xTaskGetHandle(names[i]);
             if (t) {
-                printf("  %-9s %5u B of stack never used\n", names[i], (unsigned)uxTaskGetStackHighWaterMark(t));
+                printf("  %-12s %5u B of stack never used\n", names[i], (unsigned)uxTaskGetStackHighWaterMark(t));
             }
         }
     }
@@ -314,11 +315,26 @@ static int cmd_reboot(int argc, char **argv)
     return 0;
 }
 
+// The REPL waits in our command meanwhile, so the UART is ours: read its
+// driver directly (the REPL installed it). stdin's VFS would add nothing, and
+// in the console's CR mode it holds no byte back.
+int console_stream_read(void *buf, size_t n, int timeout_ms)
+{
+    if (!n) {
+        return 0;                           // asking whether this console streams: it does
+    }
+    int got = uart_read_bytes(CONFIG_ESP_CONSOLE_UART_NUM, buf, n, pdMS_TO_TICKS(timeout_ms));
+    return got < 0 ? -1 : got;
+}
+
 void console_start(void)
 {
     esp_console_repl_t *repl;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_cfg.prompt = "sol>";
+    // lua list, sums and recv parse manifests and hash files on this task:
+    // with the default 4 KB, lua list left ~600 bytes of it unused.
+    repl_cfg.task_stack_size = 5 * 1024;
     esp_console_dev_uart_config_t uart_cfg = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &repl));
 
