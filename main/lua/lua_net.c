@@ -3,7 +3,7 @@
 // Server calls go through os_api with the app id fixed by the host. A sent
 // call's os_api ctx is an os_api_token(); its answer finds the record by
 // that, so an answer for a closed app finds nothing and touches no freed
-// memory. Spending and transfers wait for os_confirm, which the OS draws on
+// memory. Spending, transfers and deposits wait for os_confirm, which the OS draws on
 // the top layer and answers from its own keys: a script can't press it.
 
 #include <stdio.h>
@@ -16,7 +16,7 @@
 #include "lua_priv.h"
 
 typedef enum {
-    OP_BALANCE, OP_SPEND, OP_TRANSFER, OP_AWARD,
+    OP_BALANCE, OP_SPEND, OP_TRANSFER, OP_DEPOSIT, OP_AWARD,
     OP_ITEMS, OP_GRANT, OP_UPDATE, OP_REMOVE,
     OP_ME, OP_PROFILE,
     OP_REPORT, OP_ACTIVE,
@@ -28,7 +28,8 @@ static const struct {
     const char *field;
 } s_ops[] = {
     [OP_BALANCE] = {LUA_PERM_LAMPS, "balance"}, [OP_SPEND] = {LUA_PERM_LAMPS, NULL},
-    [OP_TRANSFER] = {LUA_PERM_LAMPS, NULL}, [OP_AWARD] = {LUA_PERM_LAMPS, NULL},
+    [OP_TRANSFER] = {LUA_PERM_LAMPS, NULL}, [OP_DEPOSIT] = {LUA_PERM_LAMPS, NULL},
+    [OP_AWARD] = {LUA_PERM_LAMPS, NULL},
     [OP_ITEMS] = {LUA_PERM_ITEMS, "items"}, [OP_GRANT] = {LUA_PERM_ITEMS, NULL},
     [OP_UPDATE] = {LUA_PERM_ITEMS, NULL}, [OP_REMOVE] = {LUA_PERM_ITEMS, "ok"},
     [OP_ME] = {LUA_PERM_PROFILE, NULL}, [OP_PROFILE] = {LUA_PERM_PROFILE, NULL},
@@ -144,7 +145,7 @@ static void confirm_done(bool yes, void *ctx)
 }
 
 // Starts a call. cb_idx: the callback. body_idx: table to send as JSON, or 0.
-// confirm: the dialog question for spend/transfer, or NULL.
+// confirm: the dialog question for spend/transfer/deposit, or NULL.
 static int start(lua_State *L, op_t op, const char *method, const char *path, int body_idx, int cb_idx,
                  const char *confirm)
 {
@@ -272,7 +273,7 @@ void lh_calls_run(lh_t *s)
         if (!c) {
             return;
         }
-        if (c->op == OP_SPEND || c->op == OP_TRANSFER || c->op == OP_AWARD) {
+        if (c->op == OP_SPEND || c->op == OP_TRANSFER || c->op == OP_DEPOSIT || c->op == OP_AWARD) {
             // Keep My Badge's figure in step without waiting for the next hello.
             cJSON *j = c->status >= 200 && c->status < 300 && c->body ? cJSON_Parse(c->body) : NULL;
             const cJSON *bal = cJSON_GetObjectItemCaseSensitive(j, "balance");
@@ -401,6 +402,31 @@ static int l_transfer(lua_State *L)
     snprintf(q, sizeof(q), "Send %s\nto badge %s\nfrom %s%s%s", ui_fmt_lamps(lamps, sizeof(lamps), amount), to, app,
              note[0] ? "\nmemo: " : "", note);
     return start(L, OP_TRANSFER, "POST", path, 5, 4, q);
+}
+
+// Into an escrow (an "ESC-..." address) of the app's author: the server
+// refuses anyone else's, so the dialog can name the app as the recipient.
+static int l_deposit(lua_State *L)
+{
+    const char *to = check_id(L, 1);
+    int amount = check_amount(L, 2);
+    const char *memo = luaL_optstring(L, 3, "");
+    luaL_argcheck(L, strlen(memo) <= 64, 3, "memo is at most 64 characters");
+    lua_settop(L, 4);
+    lua_createtable(L, 0, 3);
+    lua_pushvalue(L, 1);
+    lua_setfield(L, -2, "to");
+    lua_pushinteger(L, amount);
+    lua_setfield(L, -2, "amount");
+    lua_pushstring(L, memo);
+    lua_setfield(L, -2, "memo");
+    char path[80], lamps[24], app[52], note[65], q[224];
+    app_path(L, path, sizeof(path), "lamps/deposit");
+    app_label(L, app, sizeof(app));
+    lua_pkg_plain(note, sizeof(note), memo);
+    snprintf(q, sizeof(q), "Pay %s\ninto escrow %s\nof %s%s%s", ui_fmt_lamps(lamps, sizeof(lamps), amount), to, app,
+             note[0] ? "\nmemo: " : "", note);
+    return start(L, OP_DEPOSIT, "POST", path, 5, 4, q);
 }
 
 static int l_award(lua_State *L)
@@ -685,7 +711,8 @@ static int l_mesh_send(lua_State *L)
 void lh_open_net(lua_State *L)
 {
     static const luaL_Reg lamps[] = {
-        {"balance", l_balance}, {"spend", l_spend}, {"transfer", l_transfer}, {"award", l_award}, {NULL, NULL},
+        {"balance", l_balance}, {"spend", l_spend}, {"transfer", l_transfer}, {"deposit", l_deposit},
+        {"award", l_award}, {NULL, NULL},
     };
     static const luaL_Reg items[] = {
         {"list", l_items_list}, {"all", l_items_all}, {"grant", l_grant}, {"update", l_update},
