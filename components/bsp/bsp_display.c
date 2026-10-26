@@ -1,5 +1,7 @@
 // ILI9341 on the shared SPI bus, driven by LVGL through esp_lvgl_port.
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -8,9 +10,40 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "bsp.h"
+#include "bsp_bus.h"
 
 static const char *TAG = "bsp_display";
 static esp_lcd_panel_handle_t s_panel;
+static SemaphoreHandle_t s_lcd_idle;    // see bsp_bus.h
+
+void bsp_lcd_hold(void)
+{
+    if (s_lcd_idle) {
+        xSemaphoreTake(s_lcd_idle, portMAX_DELAY);
+    }
+}
+
+void bsp_lcd_release(void)
+{
+    if (s_lcd_idle) {
+        xSemaphoreGive(s_lcd_idle);
+    }
+}
+
+static void flush_start(lv_event_t *e)
+{
+    bsp_lcd_hold();
+}
+
+// Replaces esp_lvgl_port's own callback, which only calls lv_display_flush_ready()
+// (esp_lcd logs a warning that it was overwritten).
+static bool flush_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *edata, void *ctx)
+{
+    BaseType_t woken = pdFALSE;
+    lv_display_flush_ready(ctx);
+    xSemaphoreGiveFromISR(s_lcd_idle, &woken);
+    return woken == pdTRUE;
+}
 
 void bsp_backlight(bool on)
 {
@@ -66,6 +99,11 @@ lv_display_t *bsp_display_start(void)
     };
     lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);
     ESP_RETURN_ON_FALSE(disp, NULL, TAG, "lvgl display");
+    s_lcd_idle = xSemaphoreCreateBinary();
+    xSemaphoreGive(s_lcd_idle);
+    const esp_lcd_panel_io_callbacks_t cbs = { .on_color_trans_done = flush_done };
+    ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io, &cbs, disp));
+    lv_display_add_event_cb(disp, flush_start, LV_EVENT_FLUSH_START, NULL);
     bsp_backlight(true);
     ESP_LOGI(TAG, "LCD %dx%d ready", BOARD_LCD_H_RES, BOARD_LCD_V_RES);
     return disp;

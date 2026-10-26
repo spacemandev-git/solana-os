@@ -37,6 +37,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "bsp.h"
+#include "bsp_bus.h"
 
 static const char *TAG = "bsp_sd";
 
@@ -125,6 +126,7 @@ static uint8_t raw_cmd(uint8_t cmd, uint32_t arg, bool select)
     b[4] = arg >> 8;
     b[5] = arg;
     b[6] = crc7(b + 1, 5);
+    bsp_lcd_hold();
     if (select) {
         gpio_set_level(BOARD_SD_CS, 0);
     }
@@ -132,6 +134,7 @@ static uint8_t raw_cmd(uint8_t cmd, uint32_t arg, bool select)
     gpio_set_level(BOARD_SD_CS, 1);
     uint8_t ff = 0xFF;
     raw_xfer(&ff, 1);
+    bsp_lcd_release();
     for (int i = 7; i < sizeof(b); i++) {
         if (!(b[i] & 0x80)) {
             return b[i];
@@ -171,7 +174,7 @@ static bool probe_ignores_cs(void)
 
 // ---------------------------------------------------------------------------
 
-static esp_err_t sd_do_transaction(int slot, sdmmc_command_t *cmd)
+static esp_err_t sd_command(int slot, sdmmc_command_t *cmd)
 {
     if (cmd->opcode == SD_IO_RW_DIRECT || cmd->opcode == SD_IO_SEND_OP_COND) {
         return ESP_ERR_NOT_SUPPORTED;   // "illegal command": not an SDIO card
@@ -192,6 +195,14 @@ static esp_err_t sd_do_transaction(int slot, sdmmc_command_t *cmd)
         cmd->error = ESP_OK;
         return ESP_OK;
     }
+    return err;
+}
+
+static esp_err_t sd_do_transaction(int slot, sdmmc_command_t *cmd)
+{
+    bsp_lcd_hold();                     // never mid-flush: see bsp_bus.h
+    esp_err_t err = sd_command(slot, cmd);
+    bsp_lcd_release();
     return err;
 }
 

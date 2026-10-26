@@ -70,7 +70,7 @@ void app_main(void)
     boot_sweep();
     lua_host_init();
 
-    console_start();
     os_start();
     os_ota_init();
+    console_start();    // last: the device console only sees commands registered before it
 }
