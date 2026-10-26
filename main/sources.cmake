@@ -13,7 +13,7 @@ foreach(f lapi lauxlib lbaselib lcode lcorolib lctype ldebug ldo ldump lfunc lgc
 endforeach()
 
 set(SOLANA_OS_SRCS
-    core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c
+    core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c core/os_wifi_boot.c
     core/os_mesh.c core/os_api.c core/os_data.c core/os_cmd.c core/os_ota.c
     game/game.c game/xdex.c game/trade.c game/quests.c
     apps/registry.c

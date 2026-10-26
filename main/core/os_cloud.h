@@ -25,12 +25,13 @@ typedef struct {
     char claim_url[160];    // valid in OS_CLOUD_UNCLAIMED
     char owner[64];         // "@username", or the display name, or a short wallet, when claimed
     char server[96];        // configured server origin, "" = not set
+    char site[96];          // hello "site": where people open the website (text on screen), "" = not told yet
     const char *error;      // static string, valid in OS_CLOUD_ERROR
     int http_status;        // status of the last response, 0 = none (network error)
     int retry_s;            // seconds until the next hello, -1 = not scheduled
     bool busy;              // a hello is in flight (any state)
     // Owner's game state from the last hello (server/API.md), valid when claimed.
-    // Kept in NVS, so it is there offline (Wi-Fi is off at every boot).
+    // Kept in NVS, so it is there offline (Wi-Fi is often off).
     char user[9];           // owner tag; a change wipes /sdcard/hh (new owner)
     int lamps;              // !LAMPs balance
     int level;              // X Dex Level

@@ -18,7 +18,6 @@
 #include "esp_idf_version.h"
 #include "bsp.h"
 #include "core/os.h"
-#include "core/os_settings.h"
 #include "core/os_wifi.h"
 #include "core/ui.h"
 
@@ -441,13 +440,6 @@ static void led_pattern_step(void)
     bsp_rgb_show();
 }
 
-static lv_obj_t *s_inv_label;
-
-static void show_invert(void)
-{
-    lv_label_set_text_fmt(s_inv_label, "Colour inversion: %s", os_setting(OS_SET_LCD_INVERT) ? "on" : "off");
-}
-
 static void build_display(lv_obj_t *p)
 {
     // Colour check: the bars must read red, green, blue left to right.
@@ -480,23 +472,10 @@ static void build_display(lv_obj_t *p)
     s_led_label = ui_label(p, &sol_font_14, COL_TEXT, "");
     lv_obj_set_pos(s_led_label, 8, 142);
     lv_label_set_text_fmt(s_led_label, "LED pattern: %s", led_names[s_led_mode]);
-    s_inv_label = ui_label(p, &sol_font_14, COL_TEXT, "");
-    lv_obj_set_pos(s_inv_label, 8, 160);
-    show_invert();
 }
 
 static bool key_display(os_key_t k, bool repeat)
 {
-    if (k == OS_KEY_UP || k == OS_KEY_DOWN) {
-        // Wrong bar colours (RED on blue/cyan): this panel wants the other setting.
-        if (!repeat) {
-            bool on = !os_setting(OS_SET_LCD_INVERT);
-            os_setting_set(OS_SET_LCD_INVERT, on);
-            bsp_display_invert(on);
-            show_invert();
-        }
-        return true;
-    }
     if (k != OS_KEY_SELECT) {
         return false;
     }
@@ -590,7 +569,7 @@ static void build_page(int page)
         break;
     case PAGE_DISPLAY:
         build_display(s_page);
-        lv_label_set_text(s_hint, LV_SYMBOL_LEFT LV_SYMBOL_RIGHT " tab   " LV_SYMBOL_UP LV_SYMBOL_DOWN " invert   SELECT LED pattern");
+        lv_label_set_text(s_hint, LV_SYMBOL_LEFT LV_SYMBOL_RIGHT " tab   SELECT cycle LED pattern");
         break;
     case PAGE_SYSTEM:
         build_system(s_page);

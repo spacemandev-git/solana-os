@@ -1,7 +1,7 @@
 #pragma once
 
 // System Wi-Fi service. Owns the driver (STA, dual-band), joins the saved
-// network when the user turns Wi-Fi on, and lets radio-hungry apps (ESP-NOW
+// network at boot (os_wifi_boot) and when the user turns Wi-Fi on, and lets radio-hungry apps (ESP-NOW
 // sniffer, mesh apps) borrow the radio with suspend/resume. While no network
 // is joined the radio waits on the park channel (the mesh channel), so
 // ESP-NOW keeps working with Wi-Fi "off".
@@ -41,13 +41,18 @@ esp_err_t os_wifi_scan_start(void);
 bool os_wifi_scan_done(void);
 int os_wifi_scan_results(wifi_ap_record_t *out, int max);
 
-// Wi-Fi is off at every boot (docs/HHGTS.md): the radio runs (ESP-NOW needs
-// it) but no network is joined until the user, or a Lua app with the "wifi"
-// permission, turns it on. On = join the saved network (no-op without one);
+// Wi-Fi starts off; os_wifi_boot() then joins the saved network if it shows up
+// within 30 s (docs/HHGTS.md). The radio runs either way (ESP-NOW needs it),
+// but no network is joined while Wi-Fi is off: until then, or until the user
+// or a Lua app with the "wifi" permission turns it on. On = join the saved network (no-op without one);
 // off = leave it. Enabled stays true through retries and failures until it is
 // turned off, the network is forgotten, or the badge reboots.
 void os_wifi_set_enabled(bool on);
 bool os_wifi_enabled(void);
+
+// At boot, after os_mesh_init(): with a saved network, turn Wi-Fi on and turn it
+// off again if it hasn't joined within 30 s. Portable (os_wifi_boot.c).
+void os_wifi_boot(void);
 
 // Join a network (turns Wi-Fi on). Credentials are saved to NVS once the
 // connection gets an IP. An AP of the SSID on the mesh channel is preferred

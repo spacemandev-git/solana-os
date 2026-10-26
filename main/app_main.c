@@ -7,7 +7,6 @@
 #include "nvs_flash.h"
 #include "bsp.h"
 #include "core/os.h"
-#include "core/os_settings.h"
 #include "core/os_wifi.h"
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
@@ -54,7 +53,6 @@ void app_main(void)
     bsp_sd_mount();
 
     bsp_display_start();
-    bsp_display_invert(os_setting(OS_SET_LCD_INVERT));
     os_splash();
 
     ESP_ERROR_CHECK(bsp_rgb_init());
@@ -66,6 +64,7 @@ void app_main(void)
     }
     os_cloud_init();
     os_mesh_init();
+    os_wifi_boot();     // after the mesh: the radio parks on its channel
     game_init();
     boot_sweep();
     lua_host_init();

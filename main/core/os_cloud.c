@@ -6,8 +6,8 @@
 // the outbox (os_api.c, through os_net.h), so the badge never has two HTTP
 // requests in flight. Everything it learns goes into s_info under a mutex;
 // apps and the console only read snapshots of it. The owner's figures, the
-// mesh key and channel live in NVS, because Wi-Fi is off at every boot and
-// the badge must work offline.
+// mesh key and channel live in NVS, because the badge must work offline
+// (Wi-Fi is often off).
 //
 // Portable: only os_http, os_wifi_state(), NVS, the MAC, the app version,
 // FreeRTOS tasks and cJSON. The emulator compiles this file unchanged and can
@@ -177,6 +177,7 @@ typedef struct {
     char key[33], user[9];
     char message[160];              // linked: the server's text
     char update[32], update_sha[65];    // "update": a Solana OS build on offer, "" = none
+    char site[96];                      // "site", printable ASCII, "" = none
     int update_size;
     int poll, mesh, lamps, level, packs;
     int64_t time;
@@ -275,6 +276,14 @@ static void parse(const char *body, hello_t *r)
     bool uok = uv && uv[0] && strlen(uv) < sizeof(r->update) && us && strlen(us) == 64 && usize > 0;
     for (const char *p = uv; uok && *p; p++) {
         uok = *p > 0x20 && *p < 0x7F;   // shown on screen and sent back in a URL
+    }
+    const char *site = cJSON_GetStringValue(cJSON_GetObjectItem(j, "site"));
+    bool sok = site && strlen(site) < sizeof(r->site);
+    for (const char *p = site; sok && *p; p++) {
+        sok = *p > 0x20 && *p < 0x7F;   // shown on screen
+    }
+    if (sok) {
+        strlcpy(r->site, site, sizeof(r->site));
     }
     if (uok) {
         strlcpy(r->update, uv, sizeof(r->update));
@@ -433,6 +442,9 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
             s_time_off = r->time;
         }
         strlcpy(s_info.claim_url, r->claim_url, sizeof(s_info.claim_url));
+        if (r->site[0]) {
+            strlcpy(s_info.site, r->site, sizeof(s_info.site));
+        }
         if (r->claimed) {
             if (strcmp(s_info.owner, r->owner)) {
                 nvs_save("owner", r->owner);

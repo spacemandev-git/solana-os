@@ -1,5 +1,5 @@
 // System Wi-Fi service: STA on both bands, saved network in NVS, joined only
-// while the user has Wi-Fi on (off at every boot), auto reconnect, async
+// while Wi-Fi is on (at boot if it's in range: os_wifi_boot.c), auto reconnect, async
 // scans, suspend/resume for apps that need the radio, and the park channel
 // the radio returns to whenever no network is joined (ESP-NOW listens there).
 //
@@ -201,7 +201,11 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     LOCK();
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         s_started = true;
-        park_locked();      // Wi-Fi is off at boot: nothing to join yet
+        if (s_enabled && s_ssid[0] && !s_suspended) {
+            start_connect_locked();     // turned on (os_wifi_boot) before the driver had started
+        } else {
+            park_locked();
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *d = data;
         s_ip[0] = 0;
@@ -281,7 +285,7 @@ esp_err_t os_wifi_init(void)
 
     if (os_wifi_saved_ssid(s_ssid, sizeof(s_ssid))) {
         os_wifi_saved_pass(s_pass, sizeof(s_pass));
-        ESP_LOGI(TAG, "saved network '%s' (Wi-Fi stays off until turned on)", s_ssid);
+        ESP_LOGI(TAG, "saved network '%s'", s_ssid);
     }
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
     if (esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO) != ESP_OK) {

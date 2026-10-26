@@ -74,8 +74,8 @@ static void claim_code(const char *url, char *out, size_t n)
     }
 }
 
-// "https://host/claim?b=..." -> "host/claim"
-static void claim_page(const char *url, char *out, size_t n)
+// "https://host/path?b=..." -> "host/path": a link as text to type in
+static void url_text(const char *url, char *out, size_t n)
 {
     const char *p = strstr(url, "://");
     p = p ? p + 3 : url;
@@ -288,7 +288,7 @@ static void build_unclaimed(const os_cloud_info_t *in)
     // phone that can't scan the code.
     char code[16], url[96], line[128];
     claim_code(in->claim_url, code, sizeof(code));
-    claim_page(in->claim_url, url, sizeof(url));
+    url_text(in->claim_url, url, sizeof(url));
     int y = (CONTENT_H - QR_BOX) / 2 + 2;
     label_at(s_view, &sol_mono_12, COL_DIM, "BADGE ID", COL_X, y, 0);
     lv_obj_t *id = label_at(s_view, &sol_font_32, COL_TEXT, in->id, COL_X, y + 12, 0);
@@ -378,11 +378,16 @@ static void build_claimed(const os_cloud_info_t *in)
 
     lv_obj_t *action;
     if (in->welcome_needs_x && !in->packs) {
-        // The welcome (Starter Pack + !LAMPs) waits for a linked X account.
-        char host[64];
-        host_of(in->server, host, sizeof(host));
+        // The welcome (Starter Pack + !LAMPs) waits for a linked X account. The
+        // site (solana.com/breakpoint/badge) as hello names it, else the server's host.
+        char site[96];
+        if (in->site[0]) {
+            url_text(in->site, site, sizeof(site));
+        } else {
+            host_of(in->server, site, sizeof(site));
+        }
         action = ui_label(s_view, &sol_mono_12, COL_YELLOW, "");
-        lv_label_set_text_fmt(action, "Link X at %s/profile to get your Starter Pack and 100 !LAMPs", host);
+        lv_label_set_text_fmt(action, "Link X at %s/profile to get your Starter Pack and 100 !LAMPs", site);
         lv_obj_set_width(action, OS_ROOT_W - 16);
         lv_label_set_long_mode(action, LV_LABEL_LONG_MODE_WRAP);
         lv_obj_set_style_text_align(action, LV_TEXT_ALIGN_CENTER, 0);

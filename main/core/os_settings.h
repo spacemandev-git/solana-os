@@ -6,7 +6,6 @@
 
 typedef enum {
     OS_SET_THEME,           // OS_THEME_DARK (default) or OS_THEME_LIGHT; see ui_col()
-    OS_SET_LCD_INVERT,      // 1 (default) or 0: panel colour inversion, HW Debug > Display
     OS_SET_COUNT,
 } os_setting_t;
 

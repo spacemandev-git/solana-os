@@ -94,12 +94,6 @@ void bsp_backlight(bool on)
     s_backlight = on;
 }
 
-// The canvas has no panel quirks to undo.
-void bsp_display_invert(bool on)
-{
-    (void)on;
-}
-
 lv_display_t *bsp_display_start(void)
 {
     bsp_backlight(false);

@@ -2,7 +2,7 @@
 // simulated radio. Scans return a fixed set of obviously fake demo networks,
 // joining any of them succeeds and hands out a fake private IP. Credentials
 // use the badge's NVS keys ("wifi/ssid|pass"), saved only once "connected".
-// Like the badge, Wi-Fi is off at boot, and the emulated radio
+// Like the badge, Wi-Fi starts off (os_wifi_boot.c joins the saved one), and the emulated radio
 // (esp_wifi_emu.c, which os_radio_emu.c sends on) sits on the access point's
 // channel while joined and on the park channel otherwise.
 
@@ -164,7 +164,7 @@ esp_err_t os_wifi_init(void)
 {
     if (os_wifi_saved_ssid(s_ssid, sizeof(s_ssid))) {
         os_wifi_saved_pass(s_pass, sizeof(s_pass));
-        ESP_LOGI(TAG, "saved network '%s' (Wi-Fi stays off until turned on)", s_ssid);
+        ESP_LOGI(TAG, "saved network '%s'", s_ssid);
     }
     xTaskCreate(wifi_task, "wifi", 3072, NULL, 23, NULL);
     return ESP_OK;

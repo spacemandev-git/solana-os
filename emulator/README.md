@@ -39,7 +39,7 @@ firmware/emulator/
 | `core/os.c`, `launcher.c`, `calibrate.c`, `ui.c`, `os_cloud.c`, `apps/*`, `assets/*` | same file | same file |
 | LVGL 9.6 | managed component, Kconfig | same sources; `LV_CONF_SKIP` + `LV_CONF_KCONFIG_EXTERNAL_INCLUDE="sdkconfig.h"` generated from the badge's sdkconfig |
 | `app_main.c` | boot order | `platform/app_main_emu.c` (same order, plus `os_cloud_set_server(location.origin)`) |
-| `core/os_wifi.c` | ESP-IDF Wi-Fi STA, off at boot, parks the radio on the mesh channel | `platform/os_wifi_emu.c`: demo networks, joining always works, fake IP, same NVS keys, same off-at-boot and channel rules |
+| `core/os_wifi.c` | ESP-IDF Wi-Fi STA, joins the saved network at boot (`os_wifi_boot.c`, portable), parks the radio on the mesh channel | `platform/os_wifi_emu.c`: demo networks, joining always works, fake IP, same NVS keys, same channel rules |
 | `core/os_http.c` | esp_http_client (requests and streamed downloads) | `platform/os_http_emu.c`: `fetch()` against the page's origin; downloads land in the emulated SD card |
 | `core/os_ota_flash.c` | esp_ota_* (write the other OTA slot, confirm a new build) | `platform/os_ota_flash_emu.c`: refuses; the page always runs the site's build and the server never offers the emulator an update |
 | `core/os_radio.c` (mesh) | ESP-NOW | `platform/os_radio_emu.c`: `BroadcastChannel("solana-os-mesh")` between tabs of one origin (docs/MESH.md "Emulator transport"), on the emulated radio's channel |

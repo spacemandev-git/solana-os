@@ -13,7 +13,6 @@
 #include "bsp_bus.h"
 
 static const char *TAG = "bsp_display";
-static esp_lcd_panel_handle_t s_panel;
 static SemaphoreHandle_t s_lcd_idle;    // see bsp_bus.h
 
 void bsp_lcd_hold(void)
@@ -76,10 +75,11 @@ lv_display_t *bsp_display_start(void)
     };
     esp_lcd_panel_handle_t panel;
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io, &panel_cfg, &panel));
-    s_panel = panel;
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
+    // Production panels show true colours without inversion; with it, RED reads on
+    // cyan and GREEN on magenta. (The prototype's panel was the other way round.)
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
@@ -107,11 +107,4 @@ lv_display_t *bsp_display_start(void)
     bsp_backlight(true);
     ESP_LOGI(TAG, "LCD %dx%d ready", BOARD_LCD_H_RES, BOARD_LCD_V_RES);
     return disp;
-}
-
-void bsp_display_invert(bool on)
-{
-    if (s_panel) {
-        esp_lcd_panel_invert_color(s_panel, on);
-    }
 }

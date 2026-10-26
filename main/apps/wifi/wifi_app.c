@@ -1,4 +1,5 @@
-// Wi-Fi: Wi-Fi is off at every boot (docs/HHGTS.md). The saved network is
+// Wi-Fi: the badge joins the saved network at boot if it's in range, else
+// Wi-Fi turns off after 30 s (docs/HHGTS.md). The saved network is
 // the first row: SELECT turns Wi-Fi on (joins it) or off. Below it, a scan of
 // both bands: pick a network, type the password on the d-pad keyboard,
 // connect. The system service (os_wifi) saves it once it gets an IP.

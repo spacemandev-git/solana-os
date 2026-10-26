@@ -9,7 +9,6 @@
 #include "nvs_flash.h"
 #include "bsp.h"
 #include "core/os.h"
-#include "core/os_settings.h"
 #include "core/os_wifi.h"
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
@@ -21,8 +20,9 @@
 static const char *TAG = "solana_os";
 
 // The emulated badge talks to the server that serves the page (server/API.md:
-// one origin in production, Vite proxies /api in dev).
-EM_JS(void, page_origin, (char *out, int cap), { stringToUTF8(location.origin, out, cap); });
+// one origin in production, Vite proxies /api in dev). The page passes the site's
+// URL, base path included (solana.com/breakpoint/badge); else the page's origin.
+EM_JS(void, page_server, (char *out, int cap), { stringToUTF8(Module.server || location.origin, out, cap); });
 
 // Purple -> green sweep across the strip, then off (as in app_main.c).
 static void boot_sweep(void)
@@ -56,7 +56,6 @@ void app_main(void)
     bsp_sd_mount();
 
     bsp_display_start();
-    bsp_display_invert(os_setting(OS_SET_LCD_INVERT));
     os_splash();
 
     ESP_ERROR_CHECK(bsp_rgb_init());
@@ -68,10 +67,11 @@ void app_main(void)
     }
     os_cloud_init();
     os_mesh_init();
+    os_wifi_boot();     // after the mesh: the radio parks on its channel
     game_init();
-    char origin[96];
-    page_origin(origin, sizeof(origin));
-    os_cloud_set_server(origin);
+    char server[96];
+    page_server(server, sizeof(server));
+    os_cloud_set_server(server);
     boot_sweep();
     lua_host_init();
 
