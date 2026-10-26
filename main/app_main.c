@@ -7,9 +7,11 @@
 #include "nvs_flash.h"
 #include "bsp.h"
 #include "core/os.h"
+#include "core/os_settings.h"
 #include "core/os_wifi.h"
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
+#include "core/os_ota.h"
 #include "core/console.h"
 #include "lua/lua_host.h"
 #include "game/game.h"
@@ -52,6 +54,7 @@ void app_main(void)
     bsp_sd_mount();
 
     bsp_display_start();
+    bsp_display_invert(os_setting(OS_SET_LCD_INVERT));
     os_splash();
 
     ESP_ERROR_CHECK(bsp_rgb_init());
@@ -69,4 +72,5 @@ void app_main(void)
 
     console_start();
     os_start();
+    os_ota_init();
 }

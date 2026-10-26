@@ -14,7 +14,7 @@ endforeach()
 
 set(SOLANA_OS_SRCS
     core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c
-    core/os_mesh.c core/os_api.c core/os_data.c core/os_cmd.c
+    core/os_mesh.c core/os_api.c core/os_data.c core/os_cmd.c core/os_ota.c
     game/game.c game/xdex.c game/trade.c game/quests.c
     apps/registry.c
     apps/wifi/wifi_app.c
@@ -23,6 +23,7 @@ set(SOLANA_OS_SRCS
     apps/espnow/espnow_app.c
     apps/debug/debug_app.c
     apps/settings/settings_app.c
+    apps/update/update_app.c
     apps/about/about_app.c
     apps/store/store_app.c
     apps/apps/apps_app.c
@@ -38,6 +39,7 @@ set(SOLANA_OS_DEVICE_SRCS
     app_main.c
     core/os_wifi.c
     core/os_http.c
+    core/os_ota_flash.c
     core/os_radio.c
     core/console.c
 )

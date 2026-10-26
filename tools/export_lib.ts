@@ -80,6 +80,7 @@ export function exportBuild(opts: {
 		commit: git('rev-parse', '--short', 'HEAD') + (git('status', '--porcelain', '--', ...opts.sources) ? '-dirty' : ''),
 		flash: args.flash_settings,
 		parts,
+		app: args.app.file.split('/').pop(),
 		nvs: { ...nvs, md5: md5(new Uint8Array(nvs.size).fill(0xff)) }
 	};
 }

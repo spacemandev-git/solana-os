@@ -33,6 +33,7 @@ extern const os_app_t *const os_apps[];
 extern const int os_app_count;
 extern const os_app_t os_launcher;
 extern const os_app_t os_calibrate;     // hidden system app
+extern const os_app_t app_update;       // hidden: Settings > Software update (apps/update)
 
 void os_start(void);
 void os_splash(void);
@@ -61,6 +62,11 @@ bool os_confirm_open(void);
 // Close the open confirm if it was opened with `done` (its question no longer
 // applies): done(false, ctx) runs as if CANCEL was pressed. OS task.
 void os_confirm_dismiss(os_confirm_cb_t done);
+
+// Keep the current app on screen (a firmware update writing the flash): while
+// held, HOME toasts `why` instead of going home and os_launch() is ignored.
+// NULL releases it. OS task.
+void os_hold(const char *why);
 
 // Rebuild the UI in the current theme (OS task, LVGL locked; the Settings app).
 void os_theme_apply(void);

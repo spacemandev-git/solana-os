@@ -229,6 +229,7 @@ static void toast_create(void)
 #define CONFIRM_W   280
 
 static lv_obj_t *s_modal;
+static const char *s_hold;              // os_hold(): why the app can't be left now
 static os_confirm_cb_t s_modal_cb;
 static void *s_modal_ctx;
 
@@ -345,6 +346,10 @@ static void switch_to(const os_app_t *app)
     if (app == s_app) {
         return;
     }
+    if (s_hold) {
+        ESP_LOGW(TAG, "held: not switching to %s", app->id);
+        return;
+    }
     confirm_close(false);           // the dialog belongs to the app that is leaving
     if (s_app && s_app->on_exit) {
         s_app->on_exit();
@@ -365,7 +370,9 @@ static void dispatch(os_key_t key, bool repeat)
         return;
     }
     if (key == OS_KEY_HOME) {
-        if (!repeat) {
+        if (!repeat && s_hold) {
+            os_toast("%s", s_hold);
+        } else if (!repeat) {
             switch_to(&os_launcher);
         }
         return;
@@ -399,6 +406,10 @@ void os_launch_id(const char *id)
     }
     if (!strcmp(id, os_calibrate.id)) {
         os_launch(&os_calibrate);
+        return;
+    }
+    if (!strcmp(id, app_update.id)) {
+        os_launch(&app_update);
         return;
     }
     for (int i = 0; i < os_app_count; i++) {
@@ -627,6 +638,11 @@ void os_start(void)
         ESP_LOGE(TAG, "buttons unavailable; use the console 'key' command");
     }
     xTaskCreate(os_task, "os", 6144, NULL, 4, &s_task);
+}
+
+void os_hold(const char *why)
+{
+    s_hold = why;
 }
 
 // Settings changed the theme: rebuild everything that holds colours, then

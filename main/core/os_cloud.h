@@ -41,6 +41,11 @@ typedef struct {
     int64_t synced_ms;      // esp_timer ms of the last good hello this boot, 0 = none yet
     char message[160];      // OS_CLOUD_LINKED: the server's explanation (ASCII), else ""
     bool welcome_needs_x;   // hello "welcome":"needs_x": the owner's welcome waits for a linked X account
+    // Software update offered by the last good hello (server/API.md `update`,
+    // core/os_ota.h): version "" = none. Not kept across boots.
+    char update[32];
+    int update_size;        // bytes of the image
+    char update_sha[65];    // its SHA-256, hex
 } os_cloud_info_t;
 
 void os_cloud_init(void);                   // after os_wifi_init()

@@ -10,6 +10,7 @@
 #include "bsp.h"
 
 static const char *TAG = "bsp_display";
+static esp_lcd_panel_handle_t s_panel;
 
 void bsp_backlight(bool on)
 {
@@ -42,6 +43,7 @@ lv_display_t *bsp_display_start(void)
     };
     esp_lcd_panel_handle_t panel;
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io, &panel_cfg, &panel));
+    s_panel = panel;
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
@@ -67,4 +69,11 @@ lv_display_t *bsp_display_start(void)
     bsp_backlight(true);
     ESP_LOGI(TAG, "LCD %dx%d ready", BOARD_LCD_H_RES, BOARD_LCD_V_RES);
     return disp;
+}
+
+void bsp_display_invert(bool on)
+{
+    if (s_panel) {
+        esp_lcd_panel_invert_color(s_panel, on);
+    }
 }

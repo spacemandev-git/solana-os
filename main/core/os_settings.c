@@ -14,6 +14,7 @@ static const struct {
     int32_t def;
 } s_defs[OS_SET_COUNT] = {
     [OS_SET_THEME] = {"theme", OS_THEME_DARK},
+    [OS_SET_LCD_INVERT] = {"lcd_invert", 1},
 };
 
 static int32_t s_val[OS_SET_COUNT];

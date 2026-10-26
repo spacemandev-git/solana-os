@@ -164,3 +164,9 @@ void os_http_stats(uint32_t *requests, uint32_t *connects)
     *requests = s_requests;
     *connects = 0;
 }
+
+// fetch() hands over the whole body at once: no progress to report.
+void os_http_progress(size_t *done, size_t *total)
+{
+    *done = *total = 0;
+}

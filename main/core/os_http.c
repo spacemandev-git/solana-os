@@ -54,6 +54,7 @@ static bool s_open;                     // a kept-alive connection is (probably)
 static bool s_ticket;                   // a TLS connection to s_origin succeeded: we hold its session ticket
 static int64_t s_last_ms;
 static header_ctx_t s_hdr;              // what the event handler captures for this request
+static volatile size_t s_dl_done, s_dl_total;   // os_http_progress()
 static struct {
     uint32_t requests, connects;
 } s_n;
@@ -295,6 +296,8 @@ esp_err_t os_http_download(const char *url, const char *bearer, const char *path
     if (err == ESP_OK && *status / 100 == 2) {
         FILE *f = fopen(path, "wb");
         size_t total = 0;
+        int64_t len = esp_http_client_get_content_length(s_client);
+        s_dl_total = len > 0 ? (size_t)len : 0;
         if (!f) {
             err = ESP_FAIL;
         }
@@ -310,7 +313,9 @@ esp_err_t os_http_download(const char *url, const char *bearer, const char *path
                 err = ESP_FAIL;
             }
             total += n > 0 ? n : 0;
+            s_dl_done = total;
         }
+        s_dl_done = s_dl_total = 0;
         if (f && fclose(f) != 0 && err == ESP_OK) {
             err = ESP_FAIL;
         }
@@ -335,6 +340,12 @@ esp_err_t os_http_download(const char *url, const char *bearer, const char *path
         ESP_LOGW(TAG, "download %s failed: %s", url, esp_err_to_name(err));
     }
     return err;
+}
+
+void os_http_progress(size_t *done, size_t *total)
+{
+    *done = s_dl_done;
+    *total = s_dl_total;
 }
 
 void os_http_tick(void)

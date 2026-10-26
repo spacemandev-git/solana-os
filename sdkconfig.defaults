@@ -14,7 +14,12 @@ CONFIG_SOLANA_OS_SERVER_URL="https://bp26-badges-122982327899.us-central1.run.ap
 
 # App metadata shown in About / info
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="0.3.1"
+CONFIG_APP_PROJECT_VER="0.4.1"
+
+# Over-the-air updates (core/os_ota.c): a new build boots on trial and the
+# bootloader goes back to the previous slot unless it confirms itself. This
+# lives in the bootloader, which OTA never rewrites: it takes a /stock flash.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # FAT long file names
 CONFIG_FATFS_LFN_HEAP=y

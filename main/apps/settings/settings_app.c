@@ -1,16 +1,18 @@
 // Settings: user preferences (core/os_settings) plus shortcuts to system
 // tools. One row per item; SELECT (or LEFT/RIGHT on a choice) changes it.
-// Factory reset asks again in an OS confirm dialog (SELECT twice).
+// Software update opens the update screen (apps/update). Factory reset asks
+// again in an OS confirm dialog (SELECT twice).
 
 #include <stdio.h>
 #include <string.h>
 #include "core/os.h"
 #include "core/os_api.h"
 #include "core/os_cloud.h"
+#include "esp_app_desc.h"
 #include "core/os_settings.h"
 #include "core/ui.h"
 
-enum { ROW_THEME, ROW_CALIB, ROW_RESET, ROW_COUNT };
+enum { ROW_THEME, ROW_UPDATE, ROW_CALIB, ROW_RESET, ROW_COUNT };
 
 static ui_list_t *s_list;
 
@@ -24,6 +26,23 @@ static void row(int i, ui_row_t *r, void *ctx)
                 sizeof(r->sub));
         strlcpy(r->right, light ? "Light" : "Dark", sizeof(r->right));
         r->right_color = COL_TEXT;
+        break;
+    }
+    case ROW_UPDATE: {
+        os_cloud_info_t *in = lv_malloc(sizeof(*in));
+        if (in) {
+            os_cloud_get_info(in);
+        }
+        strlcpy(r->title, "Software update", sizeof(r->title));
+        if (in && in->update[0]) {
+            snprintf(r->sub, sizeof(r->sub), "Solana OS %.16s is ready to install", in->update);
+            strlcpy(r->right, "New", sizeof(r->right));
+            r->right_color = COL_GREEN;
+        } else {
+            snprintf(r->sub, sizeof(r->sub), "Solana OS %.32s", esp_app_get_description()->version);
+            strlcpy(r->right, LV_SYMBOL_RIGHT, sizeof(r->right));
+        }
+        lv_free(in);
         break;
     }
     case ROW_CALIB:
@@ -85,6 +104,9 @@ static bool on_key(os_key_t k, bool repeat)
     case ROW_THEME:
         os_setting_set(OS_SET_THEME, ui_light() ? OS_THEME_DARK : OS_THEME_LIGHT);
         os_theme_apply();       // rebuilds this app too; s_list is new afterwards
+        break;
+    case ROW_UPDATE:
+        os_launch(&app_update);
         break;
     case ROW_CALIB:
         os_launch(&os_calibrate);

@@ -176,6 +176,8 @@ typedef struct {
     char id[16], secret[96], claim_url[160], owner[64];
     char key[33], user[9];
     char message[160];              // linked: the server's text
+    char update[32], update_sha[65];    // "update": a Solana OS build on offer, "" = none
+    int update_size;
     int poll, mesh, lamps, level, packs;
     int64_t time;
     const char *error;
@@ -266,6 +268,19 @@ static void parse(const char *body, hello_t *r)
     r->level = num_or(j, "level", 0);
     r->packs = num_or(j, "packs", 0);
     r->time = cJSON_IsNumber(time) ? (int64_t)time->valuedouble : 0;
+    const cJSON *up = cJSON_GetObjectItem(j, "update");
+    const char *uv = cJSON_GetStringValue(cJSON_GetObjectItem(up, "version"));
+    const char *us = cJSON_GetStringValue(cJSON_GetObjectItem(up, "sha256"));
+    int usize = num_or(up, "size", 0);
+    bool uok = uv && uv[0] && strlen(uv) < sizeof(r->update) && us && strlen(us) == 64 && usize > 0;
+    for (const char *p = uv; uok && *p; p++) {
+        uok = *p > 0x20 && *p < 0x7F;   // shown on screen and sent back in a URL
+    }
+    if (uok) {
+        strlcpy(r->update, uv, sizeof(r->update));
+        strlcpy(r->update_sha, us, sizeof(r->update_sha));
+        r->update_size = usize;
+    }
     if (!id || !id[0] || strlen(id) >= sizeof(r->id)) {
         r->error = "Bad response from the server";
     } else if (!r->claimed && (!url || strlen(url) >= sizeof(r->claim_url))) {
@@ -372,6 +387,7 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
     os_cloud_state_t prev;
     bool opened = false;
     static bool s_auto_opened;          // auto-open My Badge once per boot
+    static char s_update_told[32];      // the update toasted this boot
     char toast[80] = "", id[sizeof(s_info.id)];
 
     if (r->deferred) {
@@ -445,6 +461,13 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
         }
         s_info.claimed = r->claimed;
         s_info.welcome_needs_x = r->claimed && r->needs_x;
+        strlcpy(s_info.update, r->update, sizeof(s_info.update));
+        strlcpy(s_info.update_sha, r->update_sha, sizeof(s_info.update_sha));
+        s_info.update_size = r->update_size;
+        if (r->update[0] && strcmp(r->update, s_update_told)) {
+            strlcpy(s_update_told, r->update, sizeof(s_update_told));
+            snprintf(toast, sizeof(toast), "Solana OS %s is out: Settings > Software update", r->update);
+        }
         s_info.synced_ms = now_ms();
         s_info.state = r->claimed ? OS_CLOUD_CLAIMED : OS_CLOUD_UNCLAIMED;
         s_info.error = NULL;
@@ -474,6 +497,7 @@ static int apply(const char *server, const hello_t *r, int *errors, int *backoff
         opened = cur == &os_launcher || cur == &app_wifi;
     }
     if (now == OS_CLOUD_CLAIMED && prev == OS_CLOUD_UNCLAIMED) {
+        s_update_told[0] = 0;           // the update's toast waits for the next hello
         snprintf(toast, sizeof(toast), "Linked to %s", s_info.owner);
     }
     unlock();

@@ -26,6 +26,10 @@ esp_err_t os_http_request(const char *method, const char *url, const char *beare
 esp_err_t os_http_download(const char *url, const char *bearer, const char *path, size_t max,
                            const char *header, char *hdr_out, size_t hdr_cap, int *status);
 
+// Bytes of the download in flight so far and its Content-Length (0 if
+// unknown); both 0 when none is running. Any task: a progress bar.
+void os_http_progress(size_t *done, size_t *total);
+
 // The kept-alive connection: closed after 5.5 min without requests (call
 // tick from the cloud task's loop) or at once with close (Wi-Fi gone).
 void os_http_tick(void);

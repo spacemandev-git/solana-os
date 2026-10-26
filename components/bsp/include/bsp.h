@@ -42,6 +42,9 @@ void bsp_sd_print_card(void);
 // ---- Display (ILI9341 + LVGL) ----
 lv_display_t *bsp_display_start(void);
 void bsp_backlight(bool on);
+// Panels differ between batches: the prototype's needs colour inversion (the
+// default), others show inverted colours with it. Safe from any task.
+void bsp_display_invert(bool on);
 
 // ---- Buttons ----
 #define BSP_BTN_PB(n)   (1u << ((n) - 1))   // n = 1..6
