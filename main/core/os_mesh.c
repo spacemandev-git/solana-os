@@ -909,8 +909,8 @@ static void on_frame(const rx_t *rx)
     }
     char src[OS_MESH_ID_LEN + 1];
     for (int i = 0; i < OS_MESH_ID_LEN; i++) {
-        char c = f[4 + i];
-        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) {
+        char c = f[4 + i];                  // an emulator's id starts with a lowercase 'e'
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (i == 0 && c == 'e'))) {
             s_n.rx_bad++;
             return;
         }
