@@ -267,6 +267,19 @@ const char *game_signal(int rssi)
     return rssi >= -55 ? "||||" : rssi >= -67 ? "|||." : rssi >= -78 ? "||.." : "|...";
 }
 
+const char *game_peer_reach(const os_mesh_peer_t *p)
+{
+    return p->bridged ? "bridged" : game_signal(p->rssi);
+}
+
+void game_bridge_row(ui_row_t *r, bool none)
+{
+    strlcpy(r->title, "Bridge a badge", sizeof(r->title));
+    strlcpy(r->sub, none ? "None in range. Emulator? Show it a code" : "For an emulator: show a code to scan",
+            sizeof(r->sub));
+    strlcpy(r->right, LV_SYMBOL_RIGHT, sizeof(r->right));
+}
+
 uint32_t game_parse_hex(const char *hex, uint32_t def)
 {
     if (!hex || strlen(hex) != 6) {

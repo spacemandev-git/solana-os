@@ -8,6 +8,11 @@
 // the radio. It broadcasts HELLO every ~2 s while the radio is on the mesh
 // channel and reassembles incoming messages.
 //
+// Badges that share no radio talk over a bridge through the server instead
+// (os_bridge.h, docs/MESH.md "Bridges"). A bridged badge is a peer like any
+// other (bridged = true): os_mesh_send() to its id, or to everyone, goes over
+// the bridge, and what it sends arrives through the same handlers.
+//
 // Handlers run on the mesh task, NOT the OS task: copy what you need into your
 // own state (under your own lock) and render it from on_tick, or hop over with
 // os_post(). Keep them short: the mesh task has ~2 KB of stack to spare, so
@@ -49,13 +54,14 @@ typedef struct {
     uint32_t color;         // beacon: character accent 0xRRGGBB
     char nonce[17];         // beacon: current relay nonce
     int level;              // badge: Level
-    int8_t rssi;
-    int64_t last_ms;        // esp_timer ms of the last frame heard
+    int8_t rssi;            // 0 when bridged
+    int64_t last_ms;        // esp_timer ms of the last frame heard (bridged: of the last sync)
+    bool bridged;           // over a bridge (no MAC), not the radio
 } os_mesh_peer_t;
 
 void os_mesh_init(void);                    // after os_wifi_init() and os_cloud_init()
 
-// Radio on the mesh channel, and this badge has an id and a mesh key.
+// Radio on the mesh channel or a bridge open, and this badge has an id and a mesh key.
 bool os_mesh_ready(void);
 int os_mesh_channel(void);                  // the channel peers are expected on
 
@@ -91,6 +97,25 @@ void os_mesh_nonce(char out[17]);           // 16 random lowercase hex + NUL
 
 // Apps that talk over the mesh call acquire in on_enter and release in
 // on_exit. If Wi-Fi is joined on a channel other than the mesh channel, the
-// first acquire suspends Wi-Fi and the last release resumes it.
+// first acquire suspends Wi-Fi and the last release resumes it, except while
+// os_mesh_keep_wifi() holds it.
 void os_mesh_acquire(void);
 void os_mesh_release(void);
+
+// For os_bridge. Bridges need the network: while kept, mesh apps don't suspend
+// Wi-Fi (a suspension of ours ends at once; it comes back if a mesh app is
+// still open when the hold ends). Any task.
+void os_mesh_keep_wifi(bool keep);
+
+typedef struct {
+    char id[OS_MESH_ID_LEN + 1];
+    char name[25];          // owner label, as a HELLO's "n"
+    int level;
+} os_mesh_bridged_t;
+// The open bridges after a sync (OS task): listed as live badges with
+// bridged = true, never evicted; ids missing from the list stop being peers.
+// While bridged, radio frames claiming that id are dropped.
+void os_mesh_set_bridged(const os_mesh_bridged_t *list, int n);
+// A message the server carried from bridged badge `from`: checked and
+// delivered on the mesh task like radio input. Any task; json is copied.
+void os_mesh_bridge_rx(os_mesh_type_t type, const char *from, const char *json);

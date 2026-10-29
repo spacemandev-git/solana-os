@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include "cJSON.h"
 #include "core/os_mesh.h"
+#include "core/ui.h"
 
 #define GAME_TICK_MS        250
 #define GAME_CARD_NAME      25          // MESH.md: owner label, ≤ 24 printable ASCII
@@ -50,6 +51,11 @@ void game_ascii(char *out, size_t n, const char *in);
 void game_peer_label(const char *name, const char *id, char *out, size_t n);
 // Signal bars from RSSI, e.g. "|||." (sol_mono_12 has no bar glyphs).
 const char *game_signal(int rssi);
+// X Dex and Trade's Nearby lists: a peer's right-hand column (signal bars, or
+// "bridged" for a badge over a bridge), and their last row, which opens the
+// bridge code (os_bridge_show) for an emulator to scan. none: no badges listed.
+const char *game_peer_reach(const os_mesh_peer_t *p);
+void game_bridge_row(ui_row_t *r, bool none);
 
 // Last good server answers in /sdcard/hh/cache/<name>.json, with the server
 // time they were fetched at. get returns the parsed body (cJSON_Delete it) or

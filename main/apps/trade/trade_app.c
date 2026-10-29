@@ -1,6 +1,7 @@
 // Trade: swap !LAMPs, items and Guide pages with a nearby badge (game/trade).
 //
-// Home has two tabs: Nearby (invites first, then badges in range) and Trades
+// Home has two tabs: Nearby (invites first, then badges in range or bridged,
+// then "Bridge a badge" for an emulator, core/os_bridge.h) and Trades
 // (signed trades and whether the server settled them). During a trade the
 // screen shows the other side's offer live on top and yours below; both lock,
 // and the badges sign on their own. The server settles the trade when either
@@ -11,6 +12,7 @@
 #include <string.h>
 #include "core/os.h"
 #include "core/os_api.h"
+#include "core/os_bridge.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
 #include "core/os_wifi.h"
@@ -111,6 +113,12 @@ static const char *status_word(trade_rec_status_t st, uint32_t *col)
     }
 }
 
+// The last Nearby row, once the list is ready: show the bridge code.
+static bool bridge_row(int i)
+{
+    return s->view == V_HOME && s->tab == TAB_NEARBY && game_claimed() && s->acquired && i == s->ninvites + s->npeers;
+}
+
 static void home_row(int i, ui_row_t *r, void *ctx)
 {
     if (s->tab == TAB_TRADES) {
@@ -124,6 +132,10 @@ static void home_row(int i, ui_row_t *r, void *ctx)
             lv_snprintf(r->sub, sizeof(r->sub), "Gave %s, got %s", t->gave, t->got);
         }
         strlcpy(r->right, status_word(t->status, &r->right_color), sizeof(r->right));
+        return;
+    }
+    if (bridge_row(i)) {
+        game_bridge_row(r, s->ninvites + s->npeers == 0);
         return;
     }
     if (i < s->ninvites) {
@@ -141,7 +153,7 @@ static void home_row(int i, ui_row_t *r, void *ctx)
         r->title_color = COL_DIM;
         snprintf(r->sub, sizeof(r->sub), "%s  " LV_SYMBOL_BULLET "  not linked yet", p->id);
     }
-    strlcpy(r->right, game_signal(p->rssi), sizeof(r->right));
+    strlcpy(r->right, game_peer_reach(p), sizeof(r->right));
 }
 
 static void nearby_refresh(void)
@@ -158,7 +170,7 @@ static void nearby_refresh(void)
             s->peers[s->npeers++] = s->peers[i];
         }
     }
-    ui_list_set_count(s->list, s->ninvites + s->npeers);
+    ui_list_set_count(s->list, s->ninvites + s->npeers + (game_claimed() && s->acquired));
     if (s->ninvites > before) {
         ui_list_select(s->list, 0);     // a new invite goes to the top and takes the selection
     }
@@ -810,6 +822,7 @@ static void set_hint(void)
     } else if (s->tab == TAB_NEARBY) {
         int sel = ui_list_selected(s->list);
         h = sel >= 0 && sel < s->ninvites ? "SELECT join  " LV_SYMBOL_LEFT " decline  CANCEL exit"
+          : bridge_row(sel) ? "SELECT show code  " LV_SYMBOL_RIGHT " Trades  CANCEL exit"
           : sel >= 0 ? "SELECT invite  " LV_SYMBOL_RIGHT " Trades  CANCEL exit" : LV_SYMBOL_RIGHT " Trades  CANCEL exit";
     } else {
         h = LV_SYMBOL_LEFT " Nearby  CANCEL exit";
@@ -922,6 +935,10 @@ static bool on_key(os_key_t k, bool repeat)
         return true;
     case OS_KEY_SELECT:
         if (repeat || s->tab != TAB_NEARBY || sel < 0) {
+            return true;
+        }
+        if (bridge_row(sel)) {
+            os_bridge_show();
             return true;
         }
         if (invite ? trade_join(s->invites[sel].tid, &why) : trade_invite_peer(s->peers[sel - s->ninvites].id, &why)) {

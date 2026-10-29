@@ -181,6 +181,7 @@ static void toast_show(const char *msg)
 {
     lv_label_set_text(s_toast, msg);
     lv_obj_set_hidden(s_toast, false);
+    lv_obj_move_foreground(s_toast);    // over a panel drawn after it (os_overlay)
     lv_obj_align(s_toast, LV_ALIGN_BOTTOM_MID, 0, -22);
     s_toast_until = now_ms() + TOAST_MS;
 }
@@ -339,6 +340,44 @@ static bool confirm_key(os_key_t key, bool repeat)
 }
 
 // ---------------------------------------------------------------------------
+// Overlay (OS task, LVGL locked)
+
+static const os_overlay_t *s_overlay;
+
+void os_overlay_open(const os_overlay_t *o)
+{
+    if (o != s_overlay) {
+        os_overlay_close();
+        s_overlay = o;
+    }
+}
+
+void os_overlay_close(void)
+{
+    const os_overlay_t *o = s_overlay;
+    s_overlay = NULL;
+    if (o && o->on_close) {
+        o->on_close();
+    }
+}
+
+const os_overlay_t *os_overlay(void)
+{
+    return s_overlay;
+}
+
+static bool overlay_key(os_key_t key, bool repeat)
+{
+    if (!s_overlay || key == OS_KEY_HOME) {
+        return false;
+    }
+    if (!s_overlay->on_key || !s_overlay->on_key(key, repeat)) {
+        os_overlay_close();
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // App switching (OS task, LVGL locked)
 
 static void switch_to(const os_app_t *app)
@@ -351,6 +390,7 @@ static void switch_to(const os_app_t *app)
         return;
     }
     confirm_close(false);           // the dialog belongs to the app that is leaving
+    os_overlay_close();
     if (s_app && s_app->on_exit) {
         s_app->on_exit();
     }
@@ -366,7 +406,7 @@ static void switch_to(const os_app_t *app)
 
 static void dispatch(os_key_t key, bool repeat)
 {
-    if (confirm_key(key, repeat)) {
+    if (confirm_key(key, repeat) || overlay_key(key, repeat)) {
         return;
     }
     if (key == OS_KEY_HOME) {
@@ -513,7 +553,7 @@ static void handle(const os_event_t *ev, os_key_t *held, int64_t *next_repeat, u
             down &= ~bit;
             os_key_t k = os_key_from_button(bit);
             ESP_LOGI(TAG, "button 0x%02lx -> %s", (unsigned long)bit, os_key_name(k));
-            if (s_app->on_button && k != OS_KEY_HOME && !s_modal) {
+            if (s_app->on_button && k != OS_KEY_HOME && !s_modal && !s_overlay) {
                 s_app->on_button(bit);
                 continue;
             }
@@ -583,6 +623,9 @@ static void os_task(void *arg)
             if (s_app->on_tick) {
                 s_app->on_tick();
             }
+            if (s_overlay && s_overlay->on_tick) {
+                s_overlay->on_tick();
+            }
             if (s_toast_until && now >= s_toast_until) {
                 lv_obj_set_hidden(s_toast, true);
                 s_toast_until = 0;
@@ -649,6 +692,7 @@ void os_hold(const char *why)
 // re-enter the current app so it draws itself in the new palette.
 void os_theme_apply(void)
 {
+    os_overlay_close();
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, ui_col(COL_BG), 0);
     lv_obj_delete(s_bar);

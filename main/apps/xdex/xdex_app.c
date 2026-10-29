@@ -2,14 +2,17 @@
 // cards collected so far. Each unique badge pays a bounty on upload; the
 // number of unique badges is the owner's Level.
 //
-// Nearby lists incoming requests first, then the badges in range. Yearbook
-// merges the cards on this badge with GET /api/device/xdex when online.
+// Nearby lists incoming requests first, then the badges in range (bridged ones
+// too), then "Bridge a badge", which shows the bridge code for an emulator to
+// scan (core/os_bridge.h). Yearbook merges the cards on this badge with
+// GET /api/device/xdex when online.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "core/os.h"
 #include "core/os_api.h"
+#include "core/os_bridge.h"
 #include "core/os_cloud.h"
 #include "core/os_data.h"
 #include "core/os_wifi.h"
@@ -66,9 +69,19 @@ static bool collected(const char *id)
     return false;
 }
 
+// The last Nearby row once claimed (swaps need an owner): show the bridge code.
+static bool bridge_row(int i)
+{
+    return s->tab == TAB_NEARBY && game_claimed() && i == s->npending + s->npeers;
+}
+
 static void nearby_row(int i, ui_row_t *r)
 {
     char who[GAME_CARD_NAME + 8];
+    if (bridge_row(i)) {
+        game_bridge_row(r, s->npending + s->npeers == 0);
+        return;
+    }
     if (i < s->npending) {
         const xdex_req_t *q = &s->pending[i];
         game_peer_label(q->card.n, q->card.id, who, sizeof(who));
@@ -94,14 +107,14 @@ static void nearby_row(int i, ui_row_t *r)
         r->title_color = COL_DIM;
         snprintf(r->sub, sizeof(r->sub), "%s  " LV_SYMBOL_BULLET "  not linked yet", p->id);
     }
-    strlcpy(r->right, game_signal(p->rssi), sizeof(r->right));
+    strlcpy(r->right, game_peer_reach(p), sizeof(r->right));
 }
 
 // Selected row's peer id, to keep the selection on it across refreshes.
 static const char *selected_id(void)
 {
     int sel = ui_list_selected(s->list);
-    if (sel < 0) {
+    if (sel < 0 || bridge_row(sel)) {
         return NULL;
     }
     return sel < s->npending ? s->pending[sel].card.id : s->peers[sel - s->npending].id;
@@ -111,6 +124,7 @@ static void nearby_refresh(void)
 {
     char keep[OS_MESH_ID_LEN + 1] = "";
     bool keep_pending = ui_list_selected(s->list) >= 0 && ui_list_selected(s->list) < s->npending;
+    bool keep_bridge = bridge_row(ui_list_selected(s->list));
     const char *sel = selected_id();
     if (sel) {
         strlcpy(keep, sel, sizeof(keep));
@@ -134,7 +148,10 @@ static void nearby_refresh(void)
         const char *id = pending ? s->pending[i].card.id : s->peers[i - s->npending].id;
         pick = !strcmp(id, keep) && pending == keep_pending ? i : -1;
     }
-    ui_list_set_count(s->list, s->npending + s->npeers);
+    if (pick < 0 && keep_bridge) {
+        pick = s->npending + s->npeers;     // stay on "Bridge a badge" as rows come and go
+    }
+    ui_list_set_count(s->list, s->npending + s->npeers + game_claimed());
     if (pick >= 0) {
         ui_list_select(s->list, pick);
     }
@@ -406,6 +423,8 @@ static void set_hint(void)
         h = LV_SYMBOL_LEFT " Nearby  " LV_SYMBOL_UP LV_SYMBOL_DOWN " browse  CANCEL exit";
     } else if (sel >= 0 && sel < s->npending) {
         h = "SELECT accept  " LV_SYMBOL_LEFT " decline  CANCEL exit";
+    } else if (bridge_row(sel)) {
+        h = "SELECT show code  " LV_SYMBOL_RIGHT " Yearbook";
     } else if (sel >= 0) {
         h = "SELECT ask for card  " LV_SYMBOL_RIGHT " Yearbook";
     } else {
@@ -509,6 +528,8 @@ static bool on_key(os_key_t k, bool repeat)
         }
         if (on_pending) {
             xdex_accept(s->pending[sel].card.id);
+        } else if (bridge_row(sel)) {
+            os_bridge_show();
         } else {
             const char *why;
             if (!xdex_request(s->peers[sel - s->npending].id, &why)) {

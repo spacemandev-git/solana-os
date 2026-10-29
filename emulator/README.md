@@ -76,6 +76,18 @@ same channel. Give the second tab its own identity with a query:
   pages as iframes in one visible page.
 - Console: `mesh status`, `mesh peers`, `mesh log on`, `mesh send app * big 700`.
 
+### Bridges: badges without a shared radio
+
+The tabs' radio stops at the browser. An emulated badge meets a real badge, or
+an emulator in another browser, over a **bridge** (`core/os_bridge.c`,
+docs/MESH.md "Bridges"): one shows its bridge code (`bridge show`, or X Dex /
+Trade: Bridge a badge), the other runs `bridge <code or link>`; the page's
+**Bridge a badge** panel does that from its camera, a pasted link, or
+`/emulator?bridge=<code>`. Both need Wi-Fi on. The portable firmware does the
+rest over `os_api` (`POST /api/device/bridge/sync`), so it is the same code on
+the badge. Console: `bridge`, `bridge code`, `bridge end`, `mesh peers`
+(bridged peers say so).
+
 ### Tasks and timing
 
 There are no threads (the site is static; no SharedArrayBuffer, no COOP/COEP).

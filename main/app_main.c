@@ -9,6 +9,7 @@
 #include "core/os.h"
 #include "core/os_wifi.h"
 #include "core/os_cloud.h"
+#include "core/os_bridge.h"
 #include "core/os_mesh.h"
 #include "core/os_ota.h"
 #include "core/console.h"
@@ -64,6 +65,7 @@ void app_main(void)
     }
     os_cloud_init();
     os_mesh_init();
+    os_bridge_init();
     os_wifi_boot();     // after the mesh: the radio parks on its channel
     game_init();
     boot_sweep();

@@ -11,6 +11,7 @@
 #include <string.h>
 #include "cJSON.h"
 #include "core/os_api.h"
+#include "core/os_bridge.h"
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
 #include "lua_priv.h"
@@ -651,7 +652,7 @@ static int l_mesh_nearby(lua_State *L)
     int n = os_mesh_peers(peers, MAX_PEERS);
     lua_createtable(L, n, 0);
     for (int i = 0; i < n; i++) {
-        lua_createtable(L, 0, 5);
+        lua_createtable(L, 0, 6);
         lua_pushstring(L, peers[i].id);
         lua_setfield(L, -2, "id");
         lua_pushstring(L, peers[i].name);
@@ -662,6 +663,8 @@ static int l_mesh_nearby(lua_State *L)
         lua_setfield(L, -2, "rssi");
         lua_pushstring(L, peers[i].kind == OS_PEER_BEACON ? "beacon" : "badge");
         lua_setfield(L, -2, "kind");
+        lua_pushboolean(L, peers[i].bridged);
+        lua_setfield(L, -2, "bridged");
         lua_rawseti(L, -2, i + 1);
     }
     return 1;
@@ -700,12 +703,27 @@ static int l_mesh_send(lua_State *L)
     esp_err_t e = os_mesh_send(OS_MESH_APP, bcast ? NULL : to, msg);
     if (e != ESP_OK) {
         lua_pushnil(L);
-        lua_pushliteral(L, "the mesh is off");
+        if (e == ESP_ERR_NO_MEM) {
+            lua_pushliteral(L, "too fast: the bridge is busy");
+        } else if (e == ESP_ERR_NOT_FOUND) {
+            lua_pushliteral(L, "not nearby");
+        } else {
+            lua_pushliteral(L, "the mesh is off");
+        }
         return 2;
     }
     s->mesh_sent[oldest] = now;
     lua_pushboolean(L, 1);
     return 1;
+}
+
+// mesh.bridge(): the bridge code over the app (core/os_bridge.h); the OS
+// panel takes the keys until CANCEL, so the script can't press anything there.
+static int l_mesh_bridge(lua_State *L)
+{
+    lh_need_perm(L, LUA_PERM_MESH, "mesh");
+    os_bridge_show();
+    return 0;
 }
 
 void lh_open_net(lua_State *L)
@@ -720,7 +738,8 @@ void lh_open_net(lua_State *L)
     };
     static const luaL_Reg profile[] = {{"me", l_me}, {"get", l_profile_get}, {NULL, NULL}};
     static const luaL_Reg quest[] = {{"report", l_report}, {"active", l_active}, {NULL, NULL}};
-    static const luaL_Reg mesh[] = {{"nearby", l_mesh_nearby}, {"send", l_mesh_send}, {NULL, NULL}};
+    static const luaL_Reg mesh[] = {{"nearby", l_mesh_nearby}, {"send", l_mesh_send}, {"bridge", l_mesh_bridge},
+                                    {NULL, NULL}};
     luaL_newlib(L, lamps);
     lua_setglobal(L, "lamps");
     luaL_newlib(L, items);

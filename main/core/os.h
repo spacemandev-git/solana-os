@@ -63,6 +63,20 @@ bool os_confirm_open(void);
 // applies): done(false, ctx) runs as if CANCEL was pressed. OS task.
 void os_confirm_dismiss(os_confirm_cb_t done);
 
+// An OS-drawn panel over the current app (the bridge code, core/os_bridge.c),
+// so an app, Lua ones included, can show it without being left. While open it
+// gets every key but HOME (on_key returning false closes it) and a tick every
+// OS_TICK_MS after the app's. Leaving the app, HOME and a theme change close
+// it; on_close deletes its objects. A confirm dialog still goes on top. OS task.
+typedef struct {
+    bool (*on_key)(os_key_t key, bool repeat);
+    void (*on_tick)(void);
+    void (*on_close)(void);
+} os_overlay_t;
+void os_overlay_open(const os_overlay_t *o);    // closes another one first
+void os_overlay_close(void);
+const os_overlay_t *os_overlay(void);           // the open one, or NULL
+
 // Keep the current app on screen (a firmware update writing the flash): while
 // held, HOME toasts `why` instead of going home and os_launch() is ignored.
 // NULL releases it. OS task.
