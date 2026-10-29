@@ -13,6 +13,7 @@
 #include "core/os_data.h"
 #include "lua_install.h"
 #include "lua_pkg.h"
+#include "vendor/lua.h"
 
 #define HASH_CHUNK  1024
 
@@ -216,6 +217,19 @@ bool lua_pkg_sha256_file(const char *path, uint8_t out[32], long *size)
     return ok;
 }
 
+bool lua_pkg_unhex(const char *s, uint8_t out[32])
+{
+    for (int i = 0; i < 64; i++) {
+        char c = s[i];
+        int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+        if (v < 0) {
+            return false;
+        }
+        out[i / 2] = (uint8_t)(i & 1 ? out[i / 2] << 4 | v : v);
+    }
+    return s[64] == 0;
+}
+
 void lua_pkg_hex(char *out, const uint8_t *bin, size_t n)
 {
     static const char hex[] = "0123456789abcdef";
@@ -288,6 +302,14 @@ bool lua_pkg_parse(const char *json, const char *want_id, lua_pkg_t *out)
     out->temp = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(m, "temp"));
     const cJSON *exp = cJSON_GetObjectItemCaseSensitive(m, "expires");
     out->expires = cJSON_IsNumber(exp) ? (int64_t)exp->valuedouble : 0;
+    const cJSON *code = cJSON_GetObjectItemCaseSensitive(m, "code");
+    const cJSON *luac = cJSON_GetObjectItemCaseSensitive(code, "luac");
+    const cJSON *sha = cJSON_GetObjectItemCaseSensitive(code, "sha256");
+    const cJSON *size = cJSON_GetObjectItemCaseSensitive(code, "size");
+    out->code = cJSON_IsString(luac) && !strcmp(luac->valuestring, LUA_SOLANA_LUAC) && cJSON_IsString(sha)
+                && lua_pkg_unhex(sha->valuestring, out->code_sha) && cJSON_IsNumber(size)
+                && size->valuedouble > 0 && size->valuedouble <= LUA_PKG_CODE_MAX;
+    out->code_size = out->code ? (int32_t)size->valuedouble : 0;
     cJSON_Delete(m);
     return ok;
 }

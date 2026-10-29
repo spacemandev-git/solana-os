@@ -21,6 +21,7 @@
 #include "vendor/lauxlib.h"
 #include "lua_host.h"
 #include "lua_pkg.h"
+#include "lua_xip.h"
 
 #define LH_OBJ_MAX          64          // UI objects at a time
 #define LH_TEXT_MAX         200         // bytes per label; longer text ends in "..."
@@ -79,10 +80,18 @@ typedef struct lh_call {
 
 enum { LH_CALL_QUEUED, LH_CALL_CONFIRM, LH_CALL_SENT };
 
+typedef struct {
+    uint32_t size;              // bytes run in place, 0: compiled on the badge
+    int slot;                   // flash slot, -1 if none
+    bool copied;                // copied into it at this launch
+} lh_code_stat_t;
+
 typedef struct lh {
     lua_State *L;
     lua_pkg_t pkg;
     uint32_t gen;               // launch number; events carry it
+    lua_xip_t code;             // the store's compiled code, mapped (lua_code.c); data NULL: compiled here
+    lh_code_stat_t code_stat;   // for "lua mem"
 
     // Limits
     size_t mem, mem_peak;
@@ -145,6 +154,9 @@ typedef struct {
     size_t mem_peak, mem_end;   // Lua heap; mem_end is what lua_close left (0)
     uint32_t steps_peak;        // most VM instructions in one callback
     uint32_t stack_free;        // lua task stack never used, bytes
+    uint32_t code_size;         // compiled code run in place, bytes (0: compiled on the badge)
+    int code_slot;              // its flash slot, -1 if none
+    bool code_copied;           // copied into the slot at this launch
     size_t heap_before;         // system heap free when the app started
     char err[96];               // last error, "" if none
 } lh_stats_t;
@@ -203,6 +215,15 @@ void lh_storage_flush(lh_t *s, bool force);
 // lua_fs.c: fs and require
 void lh_open_fs(lua_State *L);
 void lh_fs_close(lh_t *s);                              // the cached file, when the app stops
+
+// lua_code.c: the store's compiled code, run in place (code.bin)
+#define LH_CODE_NONE    (-1)
+bool lh_code_open(lh_t *s);         // lua task, before the state; false: compile the source
+void lh_code_close(lh_t *s);        // after lua_close
+// Loads the chunk compiled from rel ("main.lua", "lib/quiz.lua"): LUA_OK and
+// the function pushed, a lua_load error and its message, or LH_CODE_NONE
+// (nothing pushed) when the code has no such chunk.
+int lh_code_load(lua_State *L, lh_t *s, const char *rel);
 
 // lua_net.c: mesh, lamps, items, profile, quest, http
 void lh_open_net(lua_State *L);

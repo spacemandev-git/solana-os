@@ -3,11 +3,13 @@
 //
 // What a script reads goes on its own Lua heap, read straight into the new
 // string (lua_pushfilled, a vendor patch: a 16 KB read needs 16 KB, not a
-// buffer and a copy), and costs instructions: LH_FS_OPEN_STEPS per file
-// opened and one per LH_FS_BYTES_PER_STEP bytes read or compiled
-// (lh_charge_steps), so a loop of reads can't hold the LVGL lock for long. require and fs.load
-// compile straight from the card, LH_READ_CHUNK bytes at a time, so a
-// module's text is never in RAM whole; only the compiled function is.
+// buffer and a copy, and unlike a 5.5 external string the collector counts
+// it), and costs instructions: LH_FS_OPEN_STEPS per file opened and one
+// per LH_FS_BYTES_PER_STEP bytes read or compiled (lh_charge_steps), so a
+// loop of reads can't hold the LVGL lock for long. require and fs.load load
+// the store's compiled chunk of the file when the app has one (lua_code.c,
+// run in place); otherwise they compile straight from the card,
+// LH_READ_CHUNK bytes at a time, so a module's text is never in RAM whole.
 //
 // The last file read stays open (lh_t.fs_file): paging through a file or
 // iterating its lines seeks instead of reopening it. It's closed when the
@@ -316,15 +318,20 @@ static const char *read_piece(lua_State *L, void *ud, size_t *size)
 
 enum { COMPILED, MISSING, BROKEN };
 
-// Compiles bundled file rel: the function pushed, or (MISSING, BROKEN) its
-// error message. The parser allocates as it reads, so it gets its own file,
-// out of the finalizers' reach.
+// Bundled file rel as a function: the store's compiled chunk of it when the
+// app has one (run in place), else compiled from the card. The function
+// pushed, or (MISSING, BROKEN) its error message. The parser allocates as it
+// reads, so it gets its own file, out of the finalizers' reach.
 static int compile(lua_State *L, lh_t *s, const char *rel)
 {
     char path[160], name[LUA_PKG_PATH_MAX + 2];
     struct stat st;
-    full_path(s, rel, path, sizeof(path));
     lh_charge_steps(L, LH_FS_OPEN_STEPS);
+    int rc = lh_code_load(L, s, rel);
+    if (rc != LH_CODE_NONE) {
+        return rc == LUA_OK ? COMPILED : BROKEN;
+    }
+    full_path(s, rel, path, sizeof(path));
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
         lua_pushfstring(L, "%s: not found", rel);
         return MISSING;
@@ -337,7 +344,7 @@ static int compile(lua_State *L, lh_t *s, const char *rel)
     }
     snprintf(name, sizeof(name), "=%s", rel);
     // Text only: a binary chunk could crash the VM. lua_load never raises.
-    int rc = lua_load(L, read_piece, &r, name, "t");
+    rc = lua_load(L, read_piece, &r, name, "t");
     fclose(r.f);
     return rc == LUA_OK ? COMPILED : BROKEN;
 }

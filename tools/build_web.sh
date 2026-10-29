@@ -2,7 +2,9 @@
 # Build Solana OS once for everything the site ships, from the same tree:
 #   1. the badge image (idf.py build), published for the /stock flasher (web/static/firmware/)
 #   2. the browser emulator (web/static/emulator/)
-# Commit both outputs together so the flasher and the emulator always run the same firmware.
+#   3. the store's Lua compiler (server/src/luac/), so the code the store
+#      compiles for apps is what this Lua runs (tools/luac/)
+# Commit the outputs together so the flasher, the emulator and the store always match.
 #   bun run firmware
 set -euo pipefail
 
@@ -16,3 +18,4 @@ fi
 (cd "$root/firmware" && idf.py build)
 bun "$root/firmware/tools/export_web.ts"
 "$root/firmware/emulator/build.sh"
+"$root/firmware/tools/luac/build.sh" "$root/server/src/luac/solana-luac.js"

@@ -42,6 +42,7 @@ firmware/emulator/
 | `core/os_wifi.c` | ESP-IDF Wi-Fi STA, joins the saved network at boot (`os_wifi_boot.c`, portable), parks the radio on the mesh channel | `platform/os_wifi_emu.c`: demo networks, joining always works, fake IP, same NVS keys, same channel rules |
 | `core/os_http.c` | esp_http_client (requests and streamed downloads) | `platform/os_http_emu.c`: `fetch()` against the page's origin; downloads land in the emulated SD card |
 | `core/os_ota_flash.c` | esp_ota_* (write the other OTA slot, confirm a new build) | `platform/os_ota_flash_emu.c`: refuses; the page always runs the site's build and the server never offers the emulator an update |
+| `lua/lua_xip.c` | store apps' compiled code copied into a flash slot of the `storage` partition and mapped (run in place) | `platform/lua_xip_emu.c`: read into memory and checked against its SHA-256; the Lua heap figures (`lua mem`) match the badge's |
 | `core/os_radio.c` (mesh) | ESP-NOW | `platform/os_radio_emu.c`: `BroadcastChannel("solana-os-mesh")` between tabs of one origin (docs/MESH.md "Emulator transport"), on the emulated radio's channel |
 | `core/console.c` | UART REPL (`console_stream_read()` takes `lua recv`'s stream) | `platform/console_emu.c`: `emu_console("open wifi")` from the page; no stream, so the page writes app files into MEMFS instead |
 | `bsp_display.c` | ILI9341 + esp_lvgl_port | `bsp_display_emu.c`: 2 x 320x24 partial buffers, RGBA framebuffer for a `<canvas>` |

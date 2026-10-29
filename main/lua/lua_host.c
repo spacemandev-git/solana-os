@@ -1,7 +1,9 @@
 // Lua app host, see lua_host.h and docs/LUA_API.md.
 //
 // One app runs at a time, in a fresh lua_State on the "lua" task:
-//   boot      read main.lua, open the sandboxed libraries, compile (no lock)
+//   boot      load the code: the store's compiled code run in place from
+//             flash (lua_code.c), else main.lua compiled from the card;
+//             then open the sandboxed libraries (no lock)
 //   run       lock LVGL, run the chunk, then loop: keys, API answers, mesh
 //             messages, timers and the 50 ms on_tick, each a callback under
 //             the lock with its own instruction budget
@@ -10,6 +12,10 @@
 //             written, the state is closed and the task ends
 // An error stops the script at once: the error screen replaces its UI, and
 // CANCEL goes back to the launcher.
+//
+// Lua 5.5 (vendor/LICENSE lists the patches). Libraries are lazy
+// (vendor/lauxlib.c): their functions stay in flash until a script uses
+// one, ~5 KB less per app than filling every library table up front.
 //
 // Numbers are 32-bit (LUA_32BITS in vendor/luaconf.h): integers and floats
 // both. The C5 has no FPU, so floats are soft-float either way and single
@@ -197,16 +203,16 @@ static int run_on_exit(lua_State *L)
 
 static void close_state(lh_t *s)
 {
-    if (!s->L) {
-        return;
+    if (s->L) {
+        s->ui_off = true;
+        lh_callback(s, run_on_exit, NULL);
+        lh_storage_flush(s, true);
+        s->steps = 0;
+        lua_close(s->L);
+        s->L = NULL;
     }
-    s->ui_off = true;
-    lh_callback(s, run_on_exit, NULL);
-    lh_storage_flush(s, true);
-    s->steps = 0;
-    lua_close(s->L);
-    s->L = NULL;
     lh_fs_close(s);
+    lh_code_close(s);                       // nothing points into it now
 }
 
 // The script failed with rc and its error on the stack (or in msg_in).
@@ -324,15 +330,40 @@ static int l_collectgarbage(lua_State *L)
 
 static int boot(lua_State *L)
 {
+    // The code first: compiling needs no library, and the parser's garbage
+    // is gone before the libraries take their share (the launch peaks ~6 KB
+    // lower). The store's compiled code loads in place, with no parser.
+    lh_t *s = lh_get(L);
+    int rc = lh_code_load(L, s, "main.lua");
+    if (rc == LH_CODE_NONE) {
+        reader_t *rd = lua_touserdata(L, 1);
+        if (!rd->f) {
+            luaL_error(L, "main.lua is missing");
+        }
+        rc = lua_load(L, read_chunk, rd, "=main.lua", "t");
+    }
+    if (rc != LUA_OK) {
+        lua_error(L);
+    }
+    lua_setfield(L, LUA_REGISTRYINDEX, "solana.main");
+    lua_gc(L, LUA_GCCOLLECT);
+
     static const luaL_Reg libs[] = {
         {LUA_GNAME, luaopen_base}, {LUA_COLIBNAME, luaopen_coroutine}, {LUA_STRLIBNAME, luaopen_string},
         {LUA_TABLIBNAME, luaopen_table}, {LUA_MATHLIBNAME, luaopen_math}, {LUA_UTF8LIBNAME, luaopen_utf8},
     };
+    // Straight into the globals: there's no package.loaded to list them in.
     for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]); i++) {
-        luaL_requiref(L, libs[i].name, libs[i].func, 1);
-        lua_pop(L, 1);
+        lua_pushcfunction(L, libs[i].func);
+        lua_call(L, 0, 1);
+        if (i == 0) {
+            lua_pop(L, 1);                  // the base library fills _G itself
+        } else {
+            lua_setglobal(L, libs[i].name);
+        }
     }
-    // LUA_API.md "Standard library": no loading code, no GC control, no dump.
+    // LUA_API.md "Standard library": no loading code, no GC control, no
+    // dump (vendor/lstrlib.c leaves string.dump out).
     static const char *const drop[] = {"dofile", "loadfile", "load", "warn"};
     for (size_t i = 0; i < sizeof(drop) / sizeof(drop[0]); i++) {
         lua_pushnil(L);
@@ -340,10 +371,6 @@ static int boot(lua_State *L)
     }
     lua_register(L, "collectgarbage", l_collectgarbage);
     lua_register(L, "print", l_print);
-    lua_getglobal(L, LUA_STRLIBNAME);
-    lua_pushnil(L);
-    lua_setfield(L, -2, "dump");
-    lua_pop(L, 1);
     lua_getglobal(L, LUA_MATHLIBNAME);
     lua_getfield(L, -1, "randomseed");
     lua_pushinteger(L, (lua_Integer)(esp_random() >> 1));
@@ -356,21 +383,18 @@ static int boot(lua_State *L)
     lh_open_json(L);
     lh_open_net(L);
     lh_open_fs(L);
-    lh_storage_load(lh_get(L));
+    lh_storage_load(s);
 
-    int rc = lua_load(L, read_chunk, lua_touserdata(L, 1), "=main.lua", "t");
-    if (rc != LUA_OK) {
-        lua_error(L);
-    }
-    lua_setfield(L, LUA_REGISTRYINDEX, "solana.main");
-    // Drop the compiler's garbage now, then collect generationally: apps
-    // churn short-lived strings and tables every tick, and young
-    // collections keep the heap near the live data (mesh-wave peaked at
-    // 31 KB instead of 45 KB with the incremental collector). The cap is a
-    // ceiling; every KB a script holds is gone from the badge's heap, and
-    // TLS needs ~30 KB of it for each server call.
+    // Then collect generationally: apps churn short-lived strings and
+    // tables every tick, and young collections keep the heap near the live
+    // data (mesh-wave peaked at 31 KB instead of 45 KB with the incremental
+    // collector). A young collection every 10 % of growth instead of 20 %
+    // trims the peaks another 0.5-1.7 KB. The cap is a ceiling; every KB a
+    // script holds is gone from the badge's heap, and TLS needs ~30 KB of it
+    // for each server call.
     lua_gc(L, LUA_GCCOLLECT);
-    lua_gc(L, LUA_GCGEN, 0, 0);
+    lua_gc(L, LUA_GCGEN);
+    lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMUL, 10);
     return 0;
 }
 
@@ -487,6 +511,7 @@ static void task_end(lh_t *s)
     lh_stats = (lh_stats_t){
         .mem_peak = s->mem_peak, .mem_end = s->mem, .steps_peak = s->steps_peak,
         .stack_free = uxTaskGetStackHighWaterMark(NULL), .heap_before = s->heap_before,
+        .code_size = s->code_stat.size, .code_slot = s->code_stat.slot, .code_copied = s->code_stat.copied,
     };
     strlcpy(lh_stats.id, s->pkg.id, sizeof(lh_stats.id));
     strlcpy(lh_stats.err, s->err, sizeof(lh_stats.err));
@@ -543,27 +568,30 @@ static void lua_task(void *arg)
     s_stack_crit = bottom + LH_STACK_CRIT;
     char rel[64], path[160];
     prewarm(s);
+    // Store installs bring compiled code, run in place (lua_code.c);
+    // otherwise main.lua is compiled from the card.
+    bool xip = lh_code_open(s);
+    s->code_stat = (lh_code_stat_t){ .size = xip ? (uint32_t)s->code.size : 0, .slot = s->code.slot,
+                                     .copied = s->code.copied };
     lua_pkg_rel(rel, sizeof(rel), s->pkg.id, "main.lua");
     os_data_path(path, sizeof(path), rel);
     reader_t *rd = malloc(sizeof(*rd));
     int rc = LUA_ERRMEM;
-    s->L = rd ? lua_newstate(lh_alloc, s) : NULL;
+    s->L = rd ? lua_newstate(lh_alloc, s, esp_random()) : NULL;
     if (s->L) {
         *(lh_t **)lua_getextraspace(s->L) = s;
         lua_sethook(s->L, step_hook, LUA_MASKCOUNT, LH_HOOK_EVERY);
-        rd->f = fopen(path, "r");
+        rd->f = xip ? NULL : fopen(path, "r");
+        lua_pushcfunction(s->L, boot);
+        lua_pushlightuserdata(s->L, rd);
+        rc = lua_pcall(s->L, 1, 0, 0);
         if (rd->f) {
-            lua_pushcfunction(s->L, boot);
-            lua_pushlightuserdata(s->L, rd);
-            rc = lua_pcall(s->L, 1, 0, 0);
             fclose(rd->f);
-        } else {
-            rc = LUA_ERRFILE;
-            lua_pushliteral(s->L, "main.lua is missing");
         }
     }
     free(rd);
-    ESP_LOGI(TAG, "%s: booted (%u bytes of Lua heap)", s->pkg.id, (unsigned)s->mem);
+    ESP_LOGI(TAG, "%s: booted (%u bytes of Lua heap, %s)", s->pkg.id, (unsigned)s->mem,
+             xip ? "store code run in place" : "compiled here");
 
     if (lock(s)) {
         lv_obj_delete(s->loading);

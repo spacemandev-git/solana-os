@@ -6,8 +6,10 @@
 //   2. with bundled files, the version's index (files?v=), then each file:
 //      copied from the installed app when its SHA-256 matches, downloaded
 //      otherwise, and its hash checked either way
-//   3. app.json, and the installed app's data.json copied over
-//   4. the swap: apps/<id> -> apps/<id>.old, apps/<id>.new -> apps/<id>, and
+//   3. with compiled code for this badge (the manifest's "code"), code.bin
+//      (server/API.md "Compiled code"), kept or downloaded like a file
+//   4. app.json, and the installed app's data.json copied over
+//   5. the swap: apps/<id> -> apps/<id>.old, apps/<id>.new -> apps/<id>, and
 //      .old is removed
 // The installed version keeps working until the swap, and a power cut in the
 // middle of it leaves .old complete for lua_install_recover() to put back.
@@ -234,26 +236,19 @@ static int count_lines(const char *path)
 
 // One bundled file into the staging folder: the installed copy if it's the
 // same file, else a download. Either way its hash must match.
-static bool fetch_file(const char *id, const char *ver, const char *p, long size, const uint8_t want[32],
-                       bool *kept, char *why, size_t n)
+// dest from the installed copy (have) when it has the same contents, else
+// downloaded from url; either way its size and SHA-256 must match.
+static bool fetch_checked(const char *have, const char *dest, const char *url, long size, const uint8_t want[32],
+                          bool *kept, char *why, size_t n)
 {
-    char rel[128], have[160], dest[160], url[200];
     uint8_t got[32];
     long got_size = -1;
     struct stat st;
-    snprintf(rel, sizeof(rel), "apps/%s.new/files/%s", id, p);
-    if (!os_data_mkdirs(rel)) {
-        return card_fail(why, n);
-    }
-    os_data_path(dest, sizeof(dest), rel);
-    snprintf(rel, sizeof(rel), "apps/%s/files/%s", id, p);
-    os_data_path(have, sizeof(have), rel);
     *kept = stat(have, &st) == 0 && st.st_size == size && lua_pkg_sha256_file(have, got, NULL)
             && !memcmp(got, want, 32) && copy_file(have, dest);
     if (*kept) {
         return true;
     }
-    snprintf(url, sizeof(url), "/api/device/apps/%s/files/%s?v=%s", id, p, ver);
     int status = fetch(url, dest, size);
     if (status != 200) {
         fail_text(why, n, status);
@@ -263,6 +258,38 @@ static bool fetch_file(const char *id, const char *ver, const char *p, long size
         strlcpy(why, "A file didn't download right. Try again", n);
         return false;
     }
+    return true;
+}
+
+static bool fetch_file(const char *id, const char *ver, const char *p, long size, const uint8_t want[32],
+                       bool *kept, char *why, size_t n)
+{
+    char rel[128], have[160], dest[160], url[200];
+    snprintf(rel, sizeof(rel), "apps/%s.new/files/%s", id, p);
+    if (!os_data_mkdirs(rel)) {
+        return card_fail(why, n);
+    }
+    os_data_path(dest, sizeof(dest), rel);
+    snprintf(rel, sizeof(rel), "apps/%s/files/%s", id, p);
+    os_data_path(have, sizeof(have), rel);
+    snprintf(url, sizeof(url), "/api/device/apps/%s/files/%s?v=%s", id, p, ver);
+    return fetch_checked(have, dest, url, size, want, kept, why, n);
+}
+
+// code.bin: only for code compiled for this badge (lua_pkg_t.code).
+static bool install_code(const char *id, const char *ver, const lua_pkg_t *pkg, char *why, size_t n)
+{
+    char rel[64], have[160], dest[160], url[160];
+    bool kept;
+    snprintf(rel, sizeof(rel), "apps/%s.new/code.bin", id);
+    os_data_path(dest, sizeof(dest), rel);
+    lua_pkg_rel(rel, sizeof(rel), id, "code.bin");
+    os_data_path(have, sizeof(have), rel);
+    snprintf(url, sizeof(url), "/api/device/apps/%s/code?v=%s", id, ver);
+    if (!fetch_checked(have, dest, url, pkg->code_size, pkg->code_sha, &kept, why, n)) {
+        return false;
+    }
+    ESP_LOGI(TAG, "%s: compiled code, %ld bytes%s", id, (long)pkg->code_size, kept ? " (kept)" : "");
     return true;
 }
 
@@ -395,9 +422,12 @@ static bool install(const char *id, lua_pkg_t *pkg, char *why, size_t n)
             fail_text(why, n, status);
         }
     }
+    urlenc(ver, sizeof(ver), pkg->version);
     if (ok && pkg->files > 0) {
-        urlenc(ver, sizeof(ver), pkg->version);
         ok = install_files(id, ver, why, n);
+    }
+    if (ok && pkg->code) {
+        ok = install_code(id, ver, pkg, why, n);
     }
     ok = ok && commit(id, manifest, why, n);
     free(manifest);

@@ -6,7 +6,9 @@
 //   lua recv <id> <file> <bytes> <sha256>
 //
 // <file> is main.lua, app.json or a bundled path (docs/LUA_API.md
-// "Console"). put copies a file a line at a time: begin starts it, each
+// "Console"). Writing or removing any of them deletes the store's compiled
+// code (code.bin), which would no longer match: the app then runs from its
+// source. Nothing here can write code.bin. put copies a file a line at a time: begin starts it, each
 // base64 line appends to it, end checks it and moves it into place. recv
 // takes a whole file in one stream after its line, a block at a time when
 // the badge asks for it, so the card is never written while the UART
@@ -71,6 +73,15 @@ static int cmd_list(void)
     return n < 0;
 }
 
+// The store's compiled code no longer matches the app's files.
+static void drop_code(const char *id)
+{
+    char rel[64], path[160];
+    lua_pkg_rel(rel, sizeof(rel), id, "code.bin");
+    os_data_path(path, sizeof(path), rel);
+    unlink(path);
+}
+
 // Removes the file, then the folders inside files/ it leaves empty.
 static bool remove_file(const char *id, const char *rel)
 {
@@ -104,6 +115,7 @@ static int cmd_rm(const char *id, const char *file)
             printf("can't remove %s/%s\n", id, file);
             return 1;
         }
+        drop_code(id);
         printf("removed %s/%s\n", id, file);
         return 0;
     }
@@ -115,12 +127,23 @@ static int cmd_rm(const char *id, const char *file)
     return 0;
 }
 
+static void print_code(const lh_code_stat_t *c)
+{
+    if (c->size) {
+        printf("  code: the store's compiled code, %u bytes run in place (flash slot %d%s)\n", (unsigned)c->size,
+               c->slot, c->copied ? ", copied in at launch" : "");
+    } else {
+        printf("  code: main.lua compiled on the badge\n");
+    }
+}
+
 static int cmd_mem(void)
 {
     lh_t *s = lh_cur;
     if (s && s->L) {
         printf("running %s: %u bytes of Lua heap (peak %u, cap %d)\n", s->pkg.id, (unsigned)s->mem,
                (unsigned)s->mem_peak, LUA_HOST_HEAP_MAX);
+        print_code(&s->code_stat);
     }
     if (!lh_stats.id[0]) {
         printf("no app has finished yet\n");
@@ -134,6 +157,8 @@ static int cmd_mem(void)
            lh_stats.id, (unsigned)lh_stats.mem_peak, LUA_HOST_HEAP_MAX, (unsigned)lh_stats.mem_end,
            (unsigned)lh_stats.steps_peak, LUA_HOST_STEPS_MAX, (unsigned)lh_stats.stack_free,
            (unsigned)lh_stats.heap_before, lh_stats.err[0] ? lh_stats.err : "none");
+    print_code(&(lh_code_stat_t){ .size = lh_stats.code_size, .slot = lh_stats.code_slot,
+                                  .copied = lh_stats.code_copied });
     return 0;
 }
 
@@ -155,7 +180,11 @@ static const char *finish_file(const char *id, const char *file, const char *par
         }
     }
     unlink(path);                           // FatFs rename() won't replace a file
-    return rename(part, path) == 0 ? NULL : "can't write it to the card";
+    if (rename(part, path) != 0) {
+        return "can't write it to the card";
+    }
+    drop_code(id);
+    return NULL;
 }
 
 static int cmd_put(const char *id, const char *file, const char *arg)

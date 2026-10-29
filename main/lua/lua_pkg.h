@@ -1,8 +1,9 @@
 #pragma once
 
 // Installed Lua apps on the microSD card (docs/LUA_API.md "The package"):
-// /sdcard/hh/apps/<id>/{main.lua, app.json, data.json} and the bundled files
-// under files/. Shared by the host, the installer, the Apps library, the App
+// /sdcard/hh/apps/<id>/{main.lua, app.json, data.json}, the bundled files
+// under files/ and, for store installs, code.bin: the store's compiled code
+// (server/API.md "Compiled code"), which the host runs in place from flash. Shared by the host, the installer, the Apps library, the App
 // Store and the console.
 //
 // Reading one manifest is a small file read (fine from app callbacks);
@@ -21,6 +22,7 @@
 #define LUA_PKG_FILES_TOTAL (1024 * 1024)
 #define LUA_PKG_PATH_MAX    64              // "lib/quiz.lua"
 #define LUA_PKG_PATH_DEPTH  4
+#define LUA_PKG_CODE_MAX    (1536 * 1024)   // code.bin
 
 typedef enum {
     LUA_PERM_LED = 1 << 0,
@@ -49,6 +51,12 @@ typedef struct {
     int32_t files_size;     // their bytes
     bool temp;
     int64_t expires;        // unix ms, 0 = never
+    // The manifest's "code", when its compiler label is this badge's own
+    // (LUA_SOLANA_LUAC): code.bin's size and SHA-256. Otherwise false, and
+    // the host compiles main.lua.
+    bool code;
+    int32_t code_size;
+    uint8_t code_sha[32];
 } lua_pkg_t;
 
 // ^[a-z0-9-]{3,24}$ (the store's rule); also keeps ids safe in paths.
@@ -65,6 +73,9 @@ bool lua_pkg_valid_path(const char *path);
 // (apps/<id>/files/<path>). Fills `rel` (relative to OS_DATA_DIR) and the
 // size limit; false for an invalid name.
 bool lua_pkg_file_rel(char *rel, size_t n, const char *id, const char *file, size_t *max);
+
+// 64 hex digits into 32 bytes. false unless that's exactly what s is.
+bool lua_pkg_unhex(const char *s, uint8_t out[32]);
 
 // SHA-256 of a file (a full path), and its size. false if it can't be read.
 bool lua_pkg_sha256_file(const char *path, uint8_t out[32], long *size);

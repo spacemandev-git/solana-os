@@ -750,12 +750,16 @@ void lh_ui_close_dialog(lh_t *s)
 
 void lh_open_ui(lua_State *L)
 {
-    static const luaL_Reg common[] = {{"pos", m_pos}, {"show", m_show}, {"remove", m_remove}, {NULL, NULL}};
-    static const luaL_Reg label[] = {{"text", m_text}, {"color", m_color}, {NULL, NULL}};
-    static const luaL_Reg rect[] = {{"size", m_size}, {"color", m_color}, {NULL, NULL}};
-    static const luaL_Reg bar[] = {{"set", m_set}, {"size", m_size}, {NULL, NULL}};
-    static const luaL_Reg gradient[] = {{"size", m_size}, {NULL, NULL}};
-    static const luaL_Reg list[] = {{"items", m_items}, {"selected", m_selected}, {"select", m_select}, {NULL, NULL}};
+    // Each kind's methods, the common ones first. luaL_newlib makes them
+    // lazy (vendor/lauxlib.c): a method takes RAM once a script calls it.
+#define COMMON {"pos", m_pos}, {"show", m_show}, {"remove", m_remove}
+    static const luaL_Reg label[] = {COMMON, {"text", m_text}, {"color", m_color}, {NULL, NULL}};
+    static const luaL_Reg rect[] = {COMMON, {"size", m_size}, {"color", m_color}, {NULL, NULL}};
+    static const luaL_Reg bar[] = {COMMON, {"set", m_set}, {"size", m_size}, {NULL, NULL}};
+    static const luaL_Reg gradient[] = {COMMON, {"size", m_size}, {NULL, NULL}};
+    static const luaL_Reg list[] = {COMMON, {"items", m_items}, {"selected", m_selected}, {"select", m_select},
+                                    {NULL, NULL}};
+#undef COMMON
     static const luaL_Reg *const methods[LH_KIND_COUNT] = {label, rect, bar, gradient, list};
     static const luaL_Reg fns[] = {
         {"label", l_label}, {"rect", l_rect}, {"bar", l_bar}, {"gradient", l_gradient}, {"list", l_list},
@@ -765,9 +769,7 @@ void lh_open_ui(lua_State *L)
     lh_t *s = lh_get(L);
     for (int k = 0; k < LH_KIND_COUNT; k++) {
         luaL_newmetatable(L, s_meta[k]);
-        luaL_newlibtable(L, common);
-        luaL_setfuncs(L, common, 0);
-        luaL_setfuncs(L, methods[k], 0);
+        luaL_newlib(L, methods[k]);
         lua_setfield(L, -2, "__index");
         lua_pushliteral(L, "UI object");
         lua_setfield(L, -2, "__metatable");     // getmetatable() can't reach the methods
