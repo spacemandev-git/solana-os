@@ -53,6 +53,7 @@ typedef struct {
     char author[33];
     char category[8];
     uint32_t perms;
+    char hosts[200];                    // what http may call, one line
     int installs, ratings, rating10;    // rating × 10, -1 = none
     int size;                           // bytes of main.lua and the bundled files
 } detail_t;
@@ -522,6 +523,11 @@ static void show_detail(void)
         if (d->perms & (1u << b)) {
             snprintf(line, sizeof(line), LV_SYMBOL_BULLET "  %s", lua_perm_text(b));
             ui_label(body, &sol_font_14, COL_TEXT, line);
+            if ((1u << b) == LUA_PERM_HTTP && d->hosts[0]) {
+                lv_obj_t *l = ui_label(body, &sol_mono_12, COL_DIM, d->hosts);
+                lv_obj_set_width(l, lv_pct(100));
+                lv_obj_set_style_pad_left(l, 14, 0);
+            }
         }
     }
     lv_obj_set_user_data(box, body);
@@ -580,6 +586,7 @@ static void detail_cb(int status, const char *body, void *ctx)
     cJSON_ArrayForEach(perm, cJSON_GetObjectItemCaseSensitive(j, "permissions")) {
         d->perms |= cJSON_IsString(perm) ? lua_perm_parse(perm->valuestring) : 0;
     }
+    lua_pkg_hosts_line(cJSON_GetObjectItemCaseSensitive(j, "hosts"), d->hosts, sizeof(d->hosts));
     cJSON_Delete(j);
     show_detail();
     if (s_reask) {

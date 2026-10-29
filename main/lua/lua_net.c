@@ -1,4 +1,4 @@
-// mesh, lamps, items, profile and quest for Lua apps (docs/LUA_API.md).
+// mesh, lamps, items, profile, quest and http for Lua apps (docs/LUA_API.md).
 //
 // Server calls go through os_api with the app id fixed by the host. A sent
 // call's os_api ctx is an os_api_token(); its answer finds the record by
@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "cJSON.h"
 #include "core/os_api.h"
 #include "core/os_bridge.h"
@@ -21,6 +22,7 @@ typedef enum {
     OP_ITEMS, OP_GRANT, OP_UPDATE, OP_REMOVE,
     OP_ME, OP_PROFILE,
     OP_REPORT, OP_ACTIVE,
+    OP_HTTP,
 } op_t;
 
 // Permission per op, and the field of the answer the callback gets (NULL = all of it).
@@ -35,6 +37,7 @@ static const struct {
     [OP_UPDATE] = {LUA_PERM_ITEMS, NULL}, [OP_REMOVE] = {LUA_PERM_ITEMS, "ok"},
     [OP_ME] = {LUA_PERM_PROFILE, NULL}, [OP_PROFILE] = {LUA_PERM_PROFILE, NULL},
     [OP_REPORT] = {LUA_PERM_QUEST, NULL}, [OP_ACTIVE] = {LUA_PERM_QUEST, "items"},
+    [OP_HTTP] = {LUA_PERM_HTTP, NULL},
 };
 
 static uint32_t s_token;
@@ -146,9 +149,10 @@ static void confirm_done(bool yes, void *ctx)
 }
 
 // Starts a call. cb_idx: the callback. body_idx: table to send as JSON, or 0.
-// confirm: the dialog question for spend/transfer/deposit, or NULL.
-static int start(lua_State *L, op_t op, const char *method, const char *path, int body_idx, int cb_idx,
-                 const char *confirm)
+// confirm: the dialog question for spend/transfer/deposit, or NULL. fail: an
+// outcome known before sending (after the permission), or NULL.
+static int start_ex(lua_State *L, op_t op, const char *method, const char *path, int body_idx, int cb_idx,
+                    const char *confirm, const char *fail)
 {
     lh_t *s = lh_get(L);
     luaL_checktype(L, cb_idx, LUA_TFUNCTION);
@@ -182,6 +186,7 @@ static int start(lua_State *L, op_t op, const char *method, const char *path, in
     xSemaphoreGive(lh_mx);
 
     const char *err = !(s->pkg.perms & s_ops[op].perm) ? "denied"
+                    : fail ? fail
                     : !body_ok ? (strcmp(b.err, "too big") ? b.err : "request too big")
                     : n >= LH_CALLS_MAX || (confirm && os_confirm_open()) ? "busy"
                     : !os_api_online() ? "offline" : NULL;
@@ -202,6 +207,12 @@ static int start(lua_State *L, op_t op, const char *method, const char *path, in
     }
     free(b.p);
     return 0;
+}
+
+static int start(lua_State *L, op_t op, const char *method, const char *path, int body_idx, int cb_idx,
+                 const char *confirm)
+{
+    return start_ex(L, op, method, path, body_idx, cb_idx, confirm, NULL);
 }
 
 // The answer's {"error": "..."} text, or a fallback.
@@ -548,6 +559,168 @@ static int l_active(lua_State *L)
 }
 
 // ---------------------------------------------------------------------------
+// http: the badge server makes the request (server/API.md "App requests") and
+// answers {status, type, body, truncated, location}, which the callback gets
+// whole. It checks everything again (hosts, headers, sizes); here go the
+// checks that catch a mistake while the app is being written. A slow host
+// holds the cloud task for up to the server's 6 s, like any slow call.
+
+#define HTTP_URL_MAX        512
+#define HTTP_HEADERS_MAX    8
+#define HTTP_NAME_MAX       40
+#define HTTP_VALUE_MAX      256
+#define HTTP_BODY_MAX       2048
+
+static bool http_text(const char *s, size_t n, bool spaces)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < (spaces ? 0x20 : 0x21) || s[i] > 0x7E) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Pushes {method, url, headers, body} for os_api from the values at url_idx,
+// headers_idx and body_idx (0 = none; all absolute). Argument errors name
+// argument `arg`, or each value's own index when it's 0 (http.request has
+// them all in its one table). *fail: an outcome for the callback ("request
+// too big") instead of a Lua error.
+static void http_push(lua_State *L, const char *method, int url_idx, int headers_idx, int body_idx, int arg,
+                      const char **fail)
+{
+#define ARG(idx) (arg ? arg : (idx))
+    size_t n = 0;
+    const char *url = lua_type(L, url_idx) == LUA_TSTRING ? lua_tolstring(L, url_idx, &n) : NULL;
+    luaL_argcheck(L, url && n > 8 && n <= HTTP_URL_MAX && !strncmp(url, "https://", 8) && http_text(url, n, false),
+                  ARG(url_idx), "an https:// URL without spaces, at most 512 characters");
+    bool has_body = body_idx && !lua_isnil(L, body_idx);
+    luaL_argcheck(L, !has_body || (strcmp(method, "GET") && strcmp(method, "HEAD")), ARG(body_idx),
+                  "GET and HEAD take no body");
+    lua_createtable(L, 0, 4);
+    int req = lua_gettop(L);
+    lua_pushstring(L, method);
+    lua_setfield(L, req, "method");
+    lua_pushvalue(L, url_idx);
+    lua_setfield(L, req, "url");
+
+    bool typed = false;
+    if (headers_idx && !lua_isnil(L, headers_idx)) {
+        luaL_argcheck(L, lua_istable(L, headers_idx), ARG(headers_idx), "headers are a table");
+        lua_createtable(L, 0, 4);
+        int count = 0;
+        lua_pushnil(L);
+        while (lua_next(L, headers_idx)) {
+            size_t kn = 0, vn = 0;
+            const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tolstring(L, -2, &kn) : NULL;
+            const char *v = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &vn) : NULL;
+            bool ok = k && v && kn > 0 && kn <= HTTP_NAME_MAX && vn <= HTTP_VALUE_MAX && http_text(v, vn, true);
+            for (size_t i = 0; ok && i < kn; i++) {
+                char c = k[i];
+                ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+            }
+            luaL_argcheck(L, ok, ARG(headers_idx), "headers are name = value: letters, digits and - = printable text, at most 256");
+            luaL_argcheck(L, ++count <= HTTP_HEADERS_MAX, ARG(headers_idx), "at most 8 headers");
+            typed = typed || !strcasecmp(k, "content-type");
+            lua_pushvalue(L, -2);
+            lua_insert(L, -2);
+            lua_settable(L, req + 1);       // copy[name] = value; the name stays for lua_next
+        }
+        lua_setfield(L, req, "headers");
+    }
+
+    if (has_body) {
+        if (lua_istable(L, body_idx)) {
+            lh_jbuf_t b = { .max = HTTP_BODY_MAX };
+            if (!lh_json_encode(L, body_idx, &b)) {
+                free(b.p);
+                *fail = strcmp(b.err, "too big") ? b.err : "request too big";
+                return;
+            }
+            lh_push_jbuf(L, &b);
+            if (!typed) {
+                lua_getfield(L, req, "headers");
+                if (lua_isnil(L, -1)) {
+                    lua_pop(L, 1);
+                    lua_createtable(L, 0, 1);
+                    lua_pushvalue(L, -1);
+                    lua_setfield(L, req, "headers");
+                }
+                lua_pushliteral(L, "application/json");
+                lua_setfield(L, -2, "Content-Type");
+                lua_pop(L, 1);
+            }
+        } else {
+            luaL_argcheck(L, lua_type(L, body_idx) == LUA_TSTRING, ARG(body_idx), "the body is a string or a table");
+            if (lua_rawlen(L, body_idx) > HTTP_BODY_MAX) {
+                *fail = "request too big";
+                return;
+            }
+            lua_pushvalue(L, body_idx);
+        }
+        lua_setfield(L, req, "body");
+    }
+#undef ARG
+}
+
+static int http_send(lua_State *L, const char *method, int url_idx, int headers_idx, int body_idx, int arg, int cb_idx)
+{
+    luaL_checktype(L, cb_idx, LUA_TFUNCTION);
+    const char *fail = NULL;
+    int top = lua_gettop(L);
+    http_push(L, method, url_idx, headers_idx, body_idx, arg, &fail);
+    lua_settop(L, top + 1);     // the request (a failed one is half built: it isn't sent)
+    char path[80];
+    app_path(L, path, sizeof(path), "http");
+    return start_ex(L, OP_HTTP, "POST", path, top + 1, cb_idx, NULL, fail);
+}
+
+// http.get(url, [headers], cb)
+static int l_http_get(lua_State *L)
+{
+    bool short_form = lua_isfunction(L, 2);
+    lua_settop(L, 3);
+    return http_send(L, "GET", 1, short_form ? 0 : 2, 0, 0, short_form ? 2 : 3);
+}
+
+// http.post(url, body, [headers], cb)
+static int l_http_post(lua_State *L)
+{
+    bool short_form = lua_isfunction(L, 3);
+    lua_settop(L, 4);
+    luaL_argcheck(L, !lua_isnil(L, 2), 2, "the body is a string or a table");
+    return http_send(L, "POST", 1, short_form ? 0 : 3, 2, 0, short_form ? 3 : 4);
+}
+
+// http.request({method=, url=, headers=, body=}, cb)
+static int l_http_request(lua_State *L)
+{
+    static const char *const methods[] = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", NULL};
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_settop(L, 2);
+    lua_getfield(L, 1, "url");          // 3
+    lua_getfield(L, 1, "headers");      // 4
+    lua_getfield(L, 1, "body");         // 5
+    lua_getfield(L, 1, "method");       // 6
+    const char *method = lua_isnil(L, 5) ? "GET" : "POST";
+    if (!lua_isnil(L, 6)) {
+        char up[8] = "";
+        size_t n;
+        const char *m = lua_tolstring(L, 6, &n);
+        for (size_t i = 0; m && i < n && i + 1 < sizeof(up); i++) {
+            up[i] = m[i] >= 'a' && m[i] <= 'z' ? m[i] - 32 : m[i];
+        }
+        int i = 0;
+        while (methods[i] && (!m || n >= sizeof(up) || strcmp(up, methods[i]))) {
+            i++;
+        }
+        luaL_argcheck(L, methods[i] != NULL, 1, "method is GET, POST, PUT, PATCH, DELETE or HEAD");
+        method = methods[i];
+    }
+    return http_send(L, method, 3, 4, 5, 1, 2);
+}
+
+// ---------------------------------------------------------------------------
 // mesh: APP messages {"app":id,"to":to,"d":msg} (docs/MESH.md), only between
 // badges running the same app.
 
@@ -740,6 +913,8 @@ void lh_open_net(lua_State *L)
     static const luaL_Reg quest[] = {{"report", l_report}, {"active", l_active}, {NULL, NULL}};
     static const luaL_Reg mesh[] = {{"nearby", l_mesh_nearby}, {"send", l_mesh_send}, {"bridge", l_mesh_bridge},
                                     {NULL, NULL}};
+    static const luaL_Reg http[] = {{"get", l_http_get}, {"post", l_http_post}, {"request", l_http_request},
+                                    {NULL, NULL}};
     luaL_newlib(L, lamps);
     lua_setglobal(L, "lamps");
     luaL_newlib(L, items);
@@ -750,4 +925,6 @@ void lh_open_net(lua_State *L)
     lua_setglobal(L, "quest");
     luaL_newlib(L, mesh);
     lua_setglobal(L, "mesh");
+    luaL_newlib(L, http);
+    lua_setglobal(L, "http");
 }

@@ -17,7 +17,7 @@
 #define HASH_CHUNK  1024
 
 static const char *const s_perm_names[LUA_PERM_COUNT] = {
-    "led", "wifi", "mesh", "lamps", "items", "profile", "quest",
+    "led", "wifi", "mesh", "lamps", "items", "profile", "quest", "http",
 };
 
 static const char *const s_perm_texts[LUA_PERM_COUNT] = {
@@ -28,6 +28,7 @@ static const char *const s_perm_texts[LUA_PERM_COUNT] = {
     "Create and read your items",
     "See your profile",
     "Report quest progress",
+    "Talk to servers on the internet",
 };
 
 const char *lua_perm_name(int i)
@@ -48,6 +49,42 @@ uint32_t lua_perm_parse(const char *name)
         }
     }
     return 0;
+}
+
+void lua_pkg_hosts_line(const cJSON *hosts, char *out, size_t n)
+{
+    size_t o = 0;
+    out[0] = 0;
+    const cJSON *h;
+    cJSON_ArrayForEach(h, hosts) {
+        char one[65];
+        lua_pkg_plain(one, sizeof(one), cJSON_IsString(h) ? h->valuestring : "");
+        size_t len = strlen(one);
+        if (!len) {
+            continue;
+        }
+        if (o + (o ? 2 : 0) + len + 1 > n) {
+            strlcpy(o + 6 <= n ? out + o : out + n - 4, o + 6 <= n && o ? ", ..." : "...", 6);
+            return;
+        }
+        o += snprintf(out + o, n - o, "%s%s", o ? ", " : "", one);
+    }
+}
+
+bool lua_pkg_hosts(const char *id, char *out, size_t n)
+{
+    char rel[64];
+    out[0] = 0;
+    if (!lua_pkg_valid_id(id)) {
+        return false;
+    }
+    lua_pkg_rel(rel, sizeof(rel), id, "app.json");
+    char *json = os_data_read(rel, LUA_PKG_JSON_MAX, NULL);
+    cJSON *m = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    lua_pkg_hosts_line(cJSON_GetObjectItemCaseSensitive(m, "hosts"), out, n);
+    cJSON_Delete(m);
+    return out[0] != 0;
 }
 
 // LVGL's symbol font has no star, heart, gift or bulb: use the closest glyph.

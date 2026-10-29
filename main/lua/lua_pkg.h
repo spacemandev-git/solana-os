@@ -30,9 +30,10 @@ typedef enum {
     LUA_PERM_ITEMS = 1 << 4,
     LUA_PERM_PROFILE = 1 << 5,
     LUA_PERM_QUEST = 1 << 6,
+    LUA_PERM_HTTP = 1 << 7,
 } lua_perm_t;
 
-#define LUA_PERM_COUNT  7
+#define LUA_PERM_COUNT  8
 
 typedef struct {
     char id[LUA_PKG_ID_MAX + 1];
@@ -95,7 +96,15 @@ int lua_pkg_apply_library(const char *body);
 // "apps/<id>/<file>" relative to OS_DATA_DIR.
 void lua_pkg_rel(char *out, size_t n, const char *id, const char *file);
 
-// Permission names: "led" ... "quest", and a plain-words description.
+// What `http` may call, for the info screens: the manifest's "hosts" (a
+// cJSON array) as one "a.example.com, *.b.example.com" line of printable
+// ASCII, cut with "..." to fit. "" without any.
+struct cJSON;
+void lua_pkg_hosts_line(const struct cJSON *hosts, char *out, size_t n);
+// The same from apps/<id>/app.json (a small file read). false without any.
+bool lua_pkg_hosts(const char *id, char *out, size_t n);
+
+// Permission names: "led" ... "http", and a plain-words description.
 const char *lua_perm_name(int bit_index);
 const char *lua_perm_text(int bit_index);
 uint32_t lua_perm_parse(const char *name);     // 0 if unknown

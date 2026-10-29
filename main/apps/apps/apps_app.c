@@ -209,10 +209,16 @@ static void show_info(const lua_pkg_t *p)
     }
     lv_obj_t *h = ui_label(s_info, &sol_mono_12, COL_DIM, p->perms ? "It can:" : "It needs no permissions.");
     lv_obj_set_style_pad_top(h, 6, 0);
+    char hosts[200];
     for (int b = 0; b < LUA_PERM_COUNT; b++) {
         if (p->perms & (1u << b)) {
             snprintf(line, sizeof(line), LV_SYMBOL_BULLET "  %s", lua_perm_text(b));
             ui_label(s_info, &sol_font_14, COL_TEXT, line);
+            if ((1u << b) == LUA_PERM_HTTP && lua_pkg_hosts(p->id, hosts, sizeof(hosts))) {
+                lv_obj_t *l = ui_label(s_info, &sol_mono_12, COL_DIM, hosts);
+                lv_obj_set_width(l, lv_pct(100));
+                lv_obj_set_style_pad_left(l, 14, 0);
+            }
         }
     }
     set_hint();

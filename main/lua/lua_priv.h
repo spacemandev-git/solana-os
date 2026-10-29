@@ -204,7 +204,7 @@ void lh_storage_flush(lh_t *s, bool force);
 void lh_open_fs(lua_State *L);
 void lh_fs_close(lh_t *s);                              // the cached file, when the app stops
 
-// lua_net.c: mesh, lamps, items, profile, quest
+// lua_net.c: mesh, lamps, items, profile, quest, http
 void lh_open_net(lua_State *L);
 void lh_calls_run(lh_t *s);                             // answer finished calls
 void lh_net_stop(lh_t *s);                              // OS task, after the Lua task ended
