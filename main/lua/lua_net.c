@@ -1,4 +1,4 @@
-// mesh, lamps, items, profile, quest and http for Lua apps (docs/LUA_API.md).
+// mesh, lamps, items, profile, quest, http and rpc for Lua apps (docs/LUA_API.md).
 // ws is in lua_ws.c; while its socket is open, calls here fail with "socket open".
 //
 // Server calls go through os_api with the app id fixed by the host. A sent
@@ -24,7 +24,7 @@ typedef enum {
     OP_ITEMS, OP_GRANT, OP_UPDATE, OP_REMOVE,
     OP_ME, OP_PROFILE,
     OP_REPORT, OP_ACTIVE,
-    OP_HTTP,
+    OP_HTTP, OP_RPC,
 } op_t;
 
 // Permission per op, and the field of the answer the callback gets (NULL = all of it).
@@ -39,7 +39,7 @@ static const struct {
     [OP_UPDATE] = {LUA_PERM_ITEMS, NULL}, [OP_REMOVE] = {LUA_PERM_ITEMS, "ok"},
     [OP_ME] = {LUA_PERM_PROFILE, NULL}, [OP_PROFILE] = {LUA_PERM_PROFILE, NULL},
     [OP_REPORT] = {LUA_PERM_QUEST, NULL}, [OP_ACTIVE] = {LUA_PERM_QUEST, "items"},
-    [OP_HTTP] = {LUA_PERM_HTTP, NULL},
+    [OP_HTTP] = {LUA_PERM_HTTP, NULL}, [OP_RPC] = {LUA_PERM_RPC, "result"},
 };
 
 static uint32_t s_token;
@@ -229,12 +229,14 @@ static void push_error(lua_State *L, lh_call_t *c)
     } else {
         cJSON *j = c->body ? cJSON_Parse(c->body) : NULL;
         const cJSON *e = cJSON_GetObjectItemCaseSensitive(j, "error");
-        char buf[96];
+        char buf[128];      // rpc's "rpc <code>: <message>" is up to 120
         if (c->status == 403) {
             msg = cJSON_IsString(e) && strstr(e->valuestring, "not linked") ? "not linked" : "denied";
         } else if (cJSON_IsString(e)) {
             strlcpy(buf, e->valuestring, sizeof(buf));
             msg = buf;
+        } else if (c->status == 429) {
+            msg = "rate limited";       // a rate limit with no words (a proxy's)
         } else {
             snprintf(buf, sizeof(buf), "server error %d", c->status);
             msg = buf;
@@ -895,6 +897,56 @@ static int l_mesh_send(lua_State *L)
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// rpc: Solana JSON-RPC through the badge server (server/API.md "App RPC"),
+// which holds the nodes' URLs, checks the method and params and answers
+// {result} with big integers as strings. Here: the argument checks that
+// catch a mistake while the app is being written. No keys ever: the app
+// sends transactions signed elsewhere (LUA_API.md's warning).
+
+#define RPC_METHOD_MAX  40
+
+// rpc.call(method, [params], [{cluster=}], cb)
+static int l_rpc_call(lua_State *L)
+{
+    int top = lua_gettop(L);
+    luaL_argcheck(L, top >= 2 && top <= 4 && lua_isfunction(L, top), top < 2 ? 2 : top,
+                  "rpc.call(method, [params], [opts], cb)");
+    int cb = top;
+    size_t n = 0;
+    const char *method = luaL_checklstring(L, 1, &n);
+    bool ok = n > 0 && n <= RPC_METHOD_MAX;
+    for (size_t i = 0; ok && i < n; i++) {
+        ok = (method[i] >= 'a' && method[i] <= 'z') || (method[i] >= 'A' && method[i] <= 'Z');
+    }
+    luaL_argcheck(L, ok, 1, "a method name, like \"getBalance\"");
+    int params = top >= 3 && !lua_isnil(L, 2) ? 2 : 0;
+    luaL_argcheck(L, !params || lua_istable(L, params), 2, "params are a table");
+    const char *cluster = "mainnet";
+    if (top >= 4 && !lua_isnil(L, 3)) {
+        luaL_checktype(L, 3, LUA_TTABLE);
+        lua_getfield(L, 3, "cluster");
+        if (!lua_isnil(L, -1)) {
+            const char *c = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : "";
+            luaL_argcheck(L, !strcmp(c, "mainnet") || !strcmp(c, "devnet"), 3, "cluster is \"mainnet\" or \"devnet\"");
+            cluster = c[0] == 'd' ? "devnet" : "mainnet";
+        }
+        lua_pop(L, 1);
+    }
+    lua_createtable(L, 0, 3);
+    lua_pushvalue(L, 1);
+    lua_setfield(L, -2, "method");
+    if (params) {
+        lua_pushvalue(L, params);
+        lua_setfield(L, -2, "params");
+    }
+    lua_pushstring(L, cluster);
+    lua_setfield(L, -2, "cluster");
+    char path[80];
+    app_path(L, path, sizeof(path), "rpc");
+    return start(L, OP_RPC, "POST", path, lua_gettop(L), cb, NULL);
+}
+
 // mesh.bridge(): the bridge code over the app (core/os_bridge.h); the OS
 // panel takes the keys until CANCEL, so the script can't press anything there.
 static int l_mesh_bridge(lua_State *L)
@@ -920,6 +972,7 @@ void lh_open_net(lua_State *L)
                                     {NULL, NULL}};
     static const luaL_Reg http[] = {{"get", l_http_get}, {"post", l_http_post}, {"request", l_http_request},
                                     {NULL, NULL}};
+    static const luaL_Reg rpc[] = {{"call", l_rpc_call}, {NULL, NULL}};
     luaL_newlib(L, lamps);
     lua_setglobal(L, "lamps");
     luaL_newlib(L, items);
@@ -932,4 +985,6 @@ void lh_open_net(lua_State *L)
     lua_setglobal(L, "mesh");
     luaL_newlib(L, http);
     lua_setglobal(L, "http");
+    luaL_newlib(L, rpc);
+    lua_setglobal(L, "rpc");
 }

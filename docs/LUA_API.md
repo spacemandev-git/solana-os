@@ -56,7 +56,9 @@ says "Update to Solana OS 0.5.0 to install apps" for every app and tells how in 
 app's details, buying and downloads are refused, a quest's app download stops with
 "update Solana OS to 0.5.0 for apps", and Run on badge stops before sending anything.
 Update it from the site's firmware flasher (`/stock`, a USB-C cable) or, from 0.4.2, in
-Settings > Software update when it's offered.
+Settings > Software update when it's offered. An app with the `rpc` permission needs
+0.5.2: on 0.5.0 and 0.5.1 its details say so, and buying and downloads are refused with
+"Update Solana OS to 0.5.2 or later to install this app".
 
 The manifest, as the badge stores it:
 
@@ -70,7 +72,7 @@ The manifest, as the badge stores it:
   "icon": "play",                   // one of the icon names below
   "accent": "14F195",               // hex colour, no '#'
   "category": "games",              // games | tools | social | quests | demos
-  "permissions": ["lamps", "items", "http"],
+  "permissions": ["lamps", "items", "http"],  // led wifi mesh lamps items profile quest http rpc
   "hosts": ["api.example.com"],     // what `http` and `ws` may call (only with the `http` permission)
   "files": 2,                       // bundled files (the store fills it in)
   "filesSize": 5120,                // their bytes together
@@ -121,6 +123,7 @@ HOME always returns to the launcher. The screen below the status bar is
 | Reads | ≤ 16 KB per `fs.read` and `fs.json`, lines ≤ 512 bytes. Card reads count toward the instruction budget: 500 per file opened or looked up (`fs.exists`, `fs.size`, `fs.list`), 1 per 4 bytes read or compiled |
 | Mesh | 4 messages per second, ≤ 200 bytes each |
 | HTTP | 60 requests a minute per badge, ≤ 2 KB sent, ≤ about 3.5 KB of answer, 6 s to answer |
+| RPC | 30 calls a minute per badge (6 of them `sendTransaction`), ≤ 2 KB of params, ≤ about 3.5 KB of answer, 6 s to answer |
 | WebSocket | one at a time, 20 opens a minute per badge, ≤ 4 KB per message either way, 8 waiting to go |
 | Numbers | 32-bit integers (they wrap at ±2^31) and 32-bit floats (about 7 digits) |
 
@@ -129,7 +132,7 @@ returns to the launcher. `print(...)` goes to the badge's serial console.
 
 ### Callbacks and network calls
 
-Anything that talks to the server (including `http`, which goes through it) is
+Anything that talks to the server (including `http` and `rpc`, which go through it) is
 asynchronous and takes a callback `cb(ok, result)`: `ok` is a boolean, and `result` is
 the value or an error string (`"offline"` when Wi-Fi is off, `"not linked"` when the
 badge has no owner, `"denied"` when the app lacks the permission or the user said no,
@@ -646,7 +649,7 @@ it failed (opens count toward 20 a minute).
 
 **While a socket is open** (from `ws.open` until its `"close"`), the badge isn't
 connected to the badge server. The app's other server calls (`lamps`, `items`,
-`profile`, `quest`, `http`) fail at once with `"socket open"`, `badge.online()` is
+`profile`, `quest`, `http`, `rpc`) fail at once with `"socket open"`, `badge.online()` is
 false, and the badge's own syncs (its owner, bridges, X Dex and trade uploads) wait.
 Badges nearby over the air (`mesh`) keep working; bridged ones pause. So call the
 server first, then open the socket, and close it when you need the server again: the
@@ -748,6 +751,122 @@ function on_key(k)
   local ok, err = sock:send({text = "wave"})
   if not ok then ui.toast(err) end
   return true
+end
+```
+
+![Triton One](img/triton-on-dark.svg#gh-dark-mode-only)
+![Triton One](img/triton-on-light.svg#gh-light-mode-only)
+
+### `rpc` (permission `rpc`, Solana OS 0.5.2)
+
+Solana's JSON-RPC API on mainnet and devnet, so apps can read the chain and send
+transactions. **The badges' RPC is sponsored by [Triton One](https://triton.one)**: their
+nodes answer every call. The badge server holds the node addresses and makes each call
+for the app, as with `http`, so it needs Wi-Fi like every server call, works the same in
+the emulator, and needs no `hosts`.
+
+> **Never create or store a keypair on the badge.** A badge is not a wallet. It has no secure storage: the microSD card comes out and reads on any computer, an app's files and `storage` are plain files that the console lists and copies, and badges get lent, lost and passed around. A secret key in a script, a bundled file, `storage`, a message or a QR code is as good as published, and so is everything it holds. Sign transactions where keys are kept safe (a wallet, or your own server with its own key) and give the badge only the signed transaction to send.
+
+```lua
+rpc.call(method, params, cb)                        -- mainnet
+rpc.call(method, params, {cluster = "devnet"}, cb)  -- "mainnet" (the default) or "devnet"
+-- cb(true, result) or cb(false, "offline")
+rpc.call("getBalance", {"Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"}, function(ok, r)
+  -- r = {context = {slot = 371234567}, value = "5000000000"}
+end)
+```
+
+- `method`: one of the methods below, spelled as Solana spells it.
+- `params`: a table, sent as the call's params array (`{address, {commitment =
+  "confirmed"}}`), or nil for none. ≤ 2 KB as JSON.
+- `result` is the call's `result`, decoded: a table, string, number, boolean, or nil
+  (JSON's null, e.g. `getAccountInfo`'s `value` for an account that doesn't exist, or
+  `getTransaction` for a signature the node doesn't know).
+
+**Big numbers come back as strings.** A badge's Lua has 32-bit integers, and
+`json.decode` would turn a bigger whole number into a float good to about 7 digits:
+1.5 SOL is 1,500,000,000 lamports, but 5 SOL doesn't fit. So the badge server turns
+every whole number beyond ±2,147,483,647 into its exact decimal string. `getBalance`
+of an account with 5 SOL answers `value = "5000000000"`, with 1 SOL `value =
+1000000000` (a number). Slots and block heights still fit and stay numbers. Fractions
+stay numbers (32-bit floats): for token amounts use `uiAmountString`. `tostring()`
+gives the digits either way, so string functions turn lamports into SOL exactly:
+
+```lua
+local function sol(lamports)                 -- "5000000000" or 1500000000 -> "5" or "1.5"
+  local s = string.rep("0", 10) .. tostring(lamports)
+  local whole = s:sub(1, -10):gsub("^0+", "")
+  local frac = s:sub(-9):gsub("0+$", "")
+  return (whole == "" and "0" or whole) .. (frac ~= "" and "." .. frac or "")
+end
+```
+
+**Methods.** Reads, and `sendTransaction`:
+
+| | |
+|---|---|
+| Accounts | `getAccountInfo`, `getBalance`, `getMultipleAccounts` (≤ 5 addresses), `getMinimumBalanceForRentExemption` |
+| Tokens | `getTokenAccountBalance`, `getTokenAccountsByOwner`, `getTokenLargestAccounts`, `getTokenSupply` |
+| Transactions | `getSignaturesForAddress` (`limit` ≤ 10, and 10 if you don't set one), `getSignatureStatuses` (≤ 10), `getTransaction` (`maxSupportedTransactionVersion` is 0 unless you set it), `getFeeForMessage`, `simulateTransaction`, `sendTransaction` |
+| The chain | `getSlot`, `getBlockHeight`, `getBlockTime`, `getEpochInfo`, `getLatestBlockhash`, `isBlockhashValid`, `getRecentPrioritizationFees`, `getHealth`, `getVersion`, `getGenesisHash` |
+
+Anything else fails with `"method not allowed"`: the rest either can't answer in a
+badge-sized reply (`getBlock`, `getProgramAccounts`, `getLargestAccounts`) or isn't
+for apps (`requestAirdrop`: use a faucet).
+
+**Answers** are ≤ about 3.5 KB. A bigger one fails with `"too big"` instead of arriving
+cut, because half a JSON answer is of no use. So ask for what fits: `dataSlice =
+{offset = 0, length = 64}` with `encoding = "base64"` for an account's data,
+`encoding = "jsonParsed"` for token accounts, a smaller `limit`.
+
+**Sending transactions.** `sendTransaction` takes one signed, serialized transaction
+as base64 (≤ 1,232 bytes, so ≤ 1,644 characters) and answers its signature, a string.
+The badge server sends it with `encoding = "base64"` (it refuses any other encoding);
+the rest of the config (`skipPreflight`, `preflightCommitment`, `maxRetries`,
+`minContextSlot`) goes as you set it. `simulateTransaction` takes the same and answers
+what the node would do (`err`, `logs`, `unitsConsumed`), which can be over 3.5 KB with
+many logs. The signatures must already be in the transaction: build and sign it where
+the key lives (your server, through `http`, or a wallet), never on the badge (see the
+warning above). A sent transaction isn't confirmed yet: check it with
+`getSignatureStatuses`. A transaction the node refuses fails with the node's error and,
+in brackets, why: `"rpc -32002: Transaction simulation failed (AccountNotFound)"`, or
+`(BlockhashNotFound)`, or `({"InstructionError":[0,{"Custom":1}]})` for a program's error.
+
+`ok` is `false` with `"offline"`, `"not linked"`, `"denied"` (the app lacks the
+permission, or isn't in the store: publish before you test, as for `http`), `"busy"`,
+`"socket open"`, `"too fast"` (over 30 calls a minute, or 6 `sendTransaction`s), `"rate
+limited"` (the RPC node is limiting the badge server: wait a few seconds and try again),
+`"timeout"` (no answer within 6 s), `"unavailable"` (this badge server has no node for
+that cluster, or the node didn't answer), `"method not allowed"`, `"bad params"`,
+`"request too big"`, `"too big"`, or the node's own error as `"rpc <code>:
+<message> (<why>)"`, cut to about 120 characters. A method that isn't a string, params that
+aren't a table and an unknown cluster are Lua errors.
+
+```lua
+-- Watch a wallet: its SOL, and its latest transactions.
+local ADDR = "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"
+local bal = ui.label(0, 8, "...", {size=20, w=ui.W, align="center"})
+local list = ui.list(0, 44, ui.W, ui.H - 60, {"Loading..."}, {})
+ui.hint("SELECT refresh   CANCEL exit")
+
+local function refresh()
+  rpc.call("getBalance", {ADDR}, function(ok, r)
+    bal:text(ok and sol(r.value) .. " SOL" or r)          -- sol() from above
+  end)
+  rpc.call("getSignaturesForAddress", {ADDR, {limit = 5}}, function(ok, r)
+    if not ok then list:items({r}) return end
+    local rows = {}
+    for _, s in ipairs(r) do
+      rows[#rows + 1] = {title = s.signature:sub(1, 12) .. "...", right = s.err and "failed" or "ok"}
+    end
+    list:items(#rows > 0 and rows or {"No transactions"})
+  end)
+end
+refresh()
+
+function on_key(k)
+  if k == "select" then refresh() return true end
+  return false
 end
 ```
 

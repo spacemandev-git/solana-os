@@ -6,6 +6,23 @@ update only to a newer one. Dates are commit dates. The contracts these builds
 implement (`docs/LUA_API.md`, `docs/MESH.md`, `server/API.md`) and the server and
 site changes that came with them live in the parent repository.
 
+## 0.5.2 (2026-10-29)
+
+- **Lua Solana RPC** (`rpc`, permission `rpc`): `rpc.call(method, [params], [opts], cb)`
+  on mainnet, or devnet with `{cluster = "devnet"}`. RPC is sponsored by Triton One. The
+  badge server holds the node URLs and makes the call (`POST /api/device/apps/:id/rpc`,
+  as for `http`), allowing reads that fit a badge's 4 KB answer and `sendTransaction`
+  of a transaction signed elsewhere; the callback gets the call's `result`. Whole
+  numbers beyond 32 bits (lamports) arrive as exact decimal strings, because the
+  badge's Lua integers are 32-bit. The docs warn never to create or store a keypair on
+  the badge.
+- The permission shows as "Read and send to Solana" in the App Store's details and the
+  Apps library's info. The store refuses `rpc` apps to 0.5.0 and 0.5.1 badges, which
+  have no `rpc` module.
+- A server error shown to a script can be up to 127 characters (was 95), so an RPC
+  node's error reads in full. A 429 that comes without an error text reads
+  "rate limited" (was "server error 429").
+
 ## 0.5.1 (2026-10-29)
 
 - **Lua WebSockets** (`ws`, permission `http`, to the app's `hosts`):

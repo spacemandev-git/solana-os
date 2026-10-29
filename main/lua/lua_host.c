@@ -54,7 +54,8 @@ static const char *TAG = "lua";
 #define LH_MAX_WAIT_MS      200         // re-check the quit flag at least this often
 #define LH_LOCK_POLL_MS     20
 #define LH_PREWARM_MS       4000        // longest wait for the server connection at launch
-#define LH_SERVER_PERMS     (LUA_PERM_LAMPS | LUA_PERM_ITEMS | LUA_PERM_PROFILE | LUA_PERM_QUEST | LUA_PERM_HTTP)
+#define LH_SERVER_PERMS     (LUA_PERM_LAMPS | LUA_PERM_ITEMS | LUA_PERM_PROFILE | LUA_PERM_QUEST | LUA_PERM_HTTP | \
+                             LUA_PERM_RPC)
 
 SemaphoreHandle_t lh_mx;
 lh_t *lh_cur;
