@@ -14,7 +14,7 @@ endforeach()
 
 set(SOLANA_OS_SRCS
     core/os.c core/launcher.c core/calibrate.c core/ui.c core/os_cloud.c core/os_settings.c core/os_wifi_boot.c
-    core/os_mesh.c core/os_bridge.c core/os_api.c core/os_data.c core/os_cmd.c core/os_ota.c
+    core/os_mesh.c core/os_bridge.c core/os_api.c core/os_socket.c core/os_data.c core/os_cmd.c core/os_ota.c
     game/game.c game/xdex.c game/trade.c game/quests.c
     apps/registry.c
     apps/wifi/wifi_app.c
@@ -28,7 +28,7 @@ set(SOLANA_OS_SRCS
     apps/store/store_app.c
     apps/apps/apps_app.c
     lua/lua_host.c lua/lua_ui.c lua/lua_sys.c lua/lua_net.c lua/lua_json.c lua/lua_pkg.c lua/lua_cmd.c
-    lua/lua_fs.c lua/lua_install.c lua/lua_code.c
+    lua/lua_fs.c lua/lua_install.c lua/lua_code.c lua/lua_ws.c
     ${SOLANA_OS_LUA_VENDOR_SRCS}
     assets/sol_mono_12.c assets/sol_font_14.c assets/sol_font_20.c assets/sol_font_32.c
     assets/img_logomark_16.c assets/img_logomark_40.c assets/img_logomark_72.c
@@ -39,6 +39,7 @@ set(SOLANA_OS_DEVICE_SRCS
     app_main.c
     core/os_wifi.c
     core/os_http.c
+    core/os_ws.c
     core/os_ota_flash.c
     core/os_radio.c
     core/console.c

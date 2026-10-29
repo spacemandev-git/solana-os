@@ -1,9 +1,9 @@
 #pragma once
 
-// Internal glue between os_cloud and os_api, not for apps. The cloud task is
-// the badge's only network worker: it says hello, runs the device API queue
-// and flushes the outbox, so there is never more than one HTTP request (and
-// one TLS session, ~30 KB) in flight.
+// Internal glue between os_cloud, os_api and os_socket, not for apps. The
+// cloud task is the badge's only network worker: it says hello, runs the
+// device API queue, flushes the outbox and runs a Lua app's socket, so there
+// is never more than one HTTP request (and one TLS session, ~30 KB) in flight.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -20,3 +20,11 @@ void os_api_init(void);
 // Returns true if it did something (call again before sleeping).
 bool os_api_service(bool online);
 void os_outbox_clear(void);                 // owner change / factory reset
+
+// os_socket.c, called from the cloud task.
+void os_socket_init(void);
+// Run the socket an app opened until it ends, in place of the server
+// connection. online: Wi-Fi joined and registered; when false it ends at once
+// ("offline"). Returns true if there was one.
+bool os_socket_service(bool online);
+void os_socket_abort(void);                 // factory reset: end it without events

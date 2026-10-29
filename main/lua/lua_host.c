@@ -248,6 +248,7 @@ static void fail(lh_t *s, int rc, const char *msg_in)
     strlcpy(s->err, msg, sizeof(s->err));
     s->failed = true;
     lh_mesh_mute();
+    lh_ws_stop(s);                          // give the badge its server connection back now
     show_error(s, title, msg);
     s->killed = false;
     lua_sethook(L, step_hook, LUA_MASKCOUNT, LH_HOOK_EVERY);
@@ -382,6 +383,7 @@ static int boot(lua_State *L)
     lh_open_sys(L);
     lh_open_json(L);
     lh_open_net(L);
+    lh_open_ws(L);
     lh_open_fs(L);
     lh_storage_load(s);
 
@@ -468,6 +470,7 @@ static void run_events(lh_t *s, const lh_ev_t *ev)
         }
     }
     lh_calls_run(s);
+    lh_ws_run(s);
     int64_t now = lh_now();
     if (s->L && !s->failed && now >= s->next_tick) {
         int64_t ms = now - s->next_tick + LH_TICK_MS;

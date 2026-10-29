@@ -20,6 +20,7 @@
 //       chunks, each at a 16-aligned offset
 
 #include <string.h>
+#include <sys/stat.h>
 #include "core/os_data.h"
 #include "lua_priv.h"
 
@@ -61,7 +62,10 @@ bool lh_code_open(lh_t *s)
     char rel[64], path[160];
     lua_pkg_rel(rel, sizeof(rel), s->pkg.id, "code.bin");
     os_data_path(path, sizeof(path), rel);
-    if (!lua_xip_map(path, s->pkg.code_sha, (size_t)s->pkg.code_size, &s->code)) {
+    // A slot may still hold this code after a console upload deleted
+    // code.bin (the app's files changed): only the file says it's current.
+    struct stat st;
+    if (stat(path, &st) != 0 || !lua_xip_map(path, s->pkg.code_sha, (size_t)s->pkg.code_size, &s->code)) {
         printf("[lua:%s] no compiled code (%s): compiling main.lua\n", s->pkg.id, rel);
         return false;
     }

@@ -6,7 +6,7 @@ badge-to-badge mesh, the *Hitchhiker's Guide to Solana* game apps and a
 sandboxed Lua 5.5 app host. The same sources also build to WebAssembly for a
 browser emulator (`emulator/`) and for the store's Lua compiler (`tools/luac/`).
 
-Stack: ESP-IDF v5.5, C, LVGL 9, Lua 5.5.
+Stack: ESP-IDF v5.5, C, LVGL 9, Lua 5.5. What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 
 ## Lua apps and memory
 

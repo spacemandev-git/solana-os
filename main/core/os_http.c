@@ -370,6 +370,13 @@ void os_http_close(void)
     xSemaphoreGive(s_lock);
 }
 
+void os_http_hangup(void)
+{
+    lock();
+    close_conn();
+    xSemaphoreGive(s_lock);
+}
+
 void os_http_stats(uint32_t *requests, uint32_t *connects)
 {
     *requests = s_n.requests;

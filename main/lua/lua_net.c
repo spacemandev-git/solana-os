@@ -1,4 +1,5 @@
 // mesh, lamps, items, profile, quest and http for Lua apps (docs/LUA_API.md).
+// ws is in lua_ws.c; while its socket is open, calls here fail with "socket open".
 //
 // Server calls go through os_api with the app id fixed by the host. A sent
 // call's os_api ctx is an os_api_token(); its answer finds the record by
@@ -15,6 +16,7 @@
 #include "core/os_bridge.h"
 #include "core/os_cloud.h"
 #include "core/os_mesh.h"
+#include "core/os_socket.h"
 #include "lua_priv.h"
 
 typedef enum {
@@ -93,7 +95,7 @@ static void send(lh_call_t *c)
     free(c->req);
     c->method = c->path = c->req = NULL;
     if (e != ESP_OK) {
-        finish(c, e == ESP_ERR_INVALID_STATE ? "offline" : "busy");
+        finish(c, e != ESP_ERR_INVALID_STATE ? "busy" : os_socket_active() ? "socket open" : "offline");
     }
 }
 
@@ -189,6 +191,7 @@ static int start_ex(lua_State *L, op_t op, const char *method, const char *path,
                     : fail ? fail
                     : !body_ok ? (strcmp(b.err, "too big") ? b.err : "request too big")
                     : n >= LH_CALLS_MAX || (confirm && os_confirm_open()) ? "busy"
+                    : lh_ws_busy(s) || os_socket_active() ? "socket open"
                     : !os_api_online() ? "offline" : NULL;
     if (!err) {
         c->method = strdup(method);
@@ -314,11 +317,13 @@ void lh_net_stop(lh_t *s)
         }
     }
     xSemaphoreGive(lh_mx);
+    lh_ws_stop(s);
     lh_mesh_stop();
 }
 
 void lh_calls_free(lh_t *s)
 {
+    lh_ws_free(s);
     while (s->calls) {
         lh_call_t *c = s->calls;
         s->calls = c->next;

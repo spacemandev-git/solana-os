@@ -42,6 +42,7 @@
 #define LH_FS_OPEN_STEPS    500         // budget per file opened ...
 #define LH_FS_BYTES_PER_STEP 4          // ... and per bytes read or compiled
 #define LH_READ_CHUNK       256         // compiling from the card, a piece at a time
+#define LH_WS_LATE          4           // sockets closing without a connection, per round
 
 typedef enum { LH_LABEL, LH_RECT, LH_BAR, LH_GRADIENT, LH_LIST, LH_KIND_COUNT } lh_kind_t;
 
@@ -79,6 +80,28 @@ typedef struct lh_call {
 } lh_call_t;
 
 enum { LH_CALL_QUEUED, LH_CALL_CONFIRM, LH_CALL_SENT };
+
+// The app's socket (lua_ws.c). Handles carry the id they were made with; only
+// the live one's works. state, sock, call and the ticket's answer are shared
+// with the OS task (the answer) and the cloud task (wakes) under lh_mx.
+enum { LH_WS_NONE, LH_WS_TICKET, LH_WS_CONNECTING, LH_WS_OPEN };
+
+typedef struct {
+    uint32_t id, seq;           // the live socket (0: none), the last id given
+    uint8_t state;              // LH_WS_*
+    int cb_ref;
+    void *call;                 // the ticket call's os_api ctx
+    void *sock;                 // os_socket's ctx, once it has the socket
+    char *protocols;            // "a, b" for os_socket, or NULL
+    bool answered;              // the ticket's answer is in
+    int status;
+    char *body;
+    struct {
+        int ref;
+        const char *reason;
+    } late[LH_WS_LATE];         // closes for the next round (denied, busy, closed by the app)
+    int nlate;
+} lh_ws_t;
 
 typedef struct {
     uint32_t size;              // bytes run in place, 0: compiled on the badge
@@ -146,6 +169,9 @@ typedef struct lh {
 
     // Server calls
     lh_call_t *calls;
+
+    // ws
+    lh_ws_t ws;
 } lh_t;
 
 // Figures from the last run, for "lua mem".
@@ -224,6 +250,13 @@ void lh_code_close(lh_t *s);        // after lua_close
 // the function pushed, a lua_load error and its message, or LH_CODE_NONE
 // (nothing pushed) when the code has no such chunk.
 int lh_code_load(lua_State *L, lh_t *s, const char *rel);
+
+// lua_ws.c: the app's socket
+void lh_open_ws(lua_State *L);
+void lh_ws_run(lh_t *s);                                // Lua task: closes and the socket's events
+bool lh_ws_busy(const lh_t *s);                         // from ws.open until its close: no server calls
+void lh_ws_stop(lh_t *s);                               // any task: the app stops, the socket goes
+void lh_ws_free(lh_t *s);                               // after the Lua task ended
 
 // lua_net.c: mesh, lamps, items, profile, quest, http
 void lh_open_net(lua_State *L);

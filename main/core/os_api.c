@@ -33,6 +33,7 @@
 #include "os_data.h"
 #include "os_http.h"
 #include "os_net.h"
+#include "os_socket.h"
 #include "os_wifi.h"
 
 static const char *TAG = "os_api";
@@ -83,7 +84,8 @@ static int64_t now_ms(void)
 
 bool os_api_online(void)
 {
-    return os_wifi_state() == OS_WIFI_CONNECTED && os_cloud_registered();
+    // An app's socket holds the badge's one TLS connection (os_socket.h).
+    return os_wifi_state() == OS_WIFI_CONNECTED && os_cloud_registered() && !os_socket_active();
 }
 
 // ---------------------------------------------------------------------------

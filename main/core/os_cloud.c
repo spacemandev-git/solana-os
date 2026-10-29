@@ -4,7 +4,8 @@
 // configured server, says hello, and then repeats every `poll` seconds (or
 // with backoff after errors). Between hellos it runs the device API queue and
 // the outbox (os_api.c, through os_net.h), so the badge never has two HTTP
-// requests in flight. Everything it learns goes into s_info under a mutex;
+// requests in flight, and a Lua app's socket (os_socket.c) in place of all
+// that until it closes. Everything it learns goes into s_info under a mutex;
 // apps and the console only read snapshots of it. The owner's figures, the
 // mesh key and channel live in NVS, because the badge must work offline
 // (Wi-Fi is often off).
@@ -608,6 +609,7 @@ static void cloud_task(void *arg)
             while (os_api_service(false)) {
                 // fail what was queued: no network
             }
+            os_socket_service(false);   // and an app's socket that hadn't started
             xTaskNotifyWait(0, UINT32_MAX, &bits, pdMS_TO_TICKS(WIFI_CHECK_MS));
             if (bits & BIT_RESET) {
                 factory_reset();
@@ -633,6 +635,9 @@ static void cloud_task(void *arg)
             // due, a refresh, new work, or the next Wi-Fi check.
             if (os_api_service(os_cloud_registered())) {
                 continue;
+            }
+            if (os_socket_service(os_cloud_registered())) {
+                continue;               // an app's socket ran (in place of the server connection) until it ended
             }
             os_http_tick();             // close the server connection when it has been idle a while
             int64_t wait = next - now;
@@ -708,6 +713,7 @@ void os_cloud_init(void)
     ESP_LOGI(TAG, "server '%s', badge id '%s'%s%s%s", s_info.server, s_info.id, s_secret[0] ? ", has secret" : "",
              s_info.has_key ? ", has mesh key" : "", s_info.claimed ? ", claimed" : "");
     os_api_init();
+    os_socket_init();
     os_cmd_register("reset", "reset yes - factory reset: release the owner, wipe /sdcard/hh and NVS", cmd_reset);
     // HTTPS peaks at ~3.4 KB of stack; outbox lines and downloads add file I/O.
     xTaskCreate(cloud_task, "cloud", 6144, NULL, 2, &s_task);
@@ -737,6 +743,7 @@ void os_cloud_kick(void)
 
 void os_cloud_factory_reset(void)
 {
+    os_socket_abort();                  // the cloud task may be on an app's socket: back to us
     if (s_task) {
         xTaskNotify(s_task, BIT_RESET, eSetBits);
     }

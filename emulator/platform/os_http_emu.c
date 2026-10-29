@@ -154,6 +154,10 @@ void os_http_close(void)
 {
 }
 
+void os_http_hangup(void)
+{
+}
+
 bool os_http_connected(void)
 {
     return false;

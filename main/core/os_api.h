@@ -50,7 +50,8 @@ void *os_api_token(void);                   // unique non-NULL ctx, never a real
 // now, which opens one. Cheap when the connection is already up.
 void os_api_prewarm(void);
 
-// Wi-Fi joined, a server configured and this badge registered (has an id + secret).
+// Wi-Fi joined, a server configured and this badge registered (has an id +
+// secret), and no app's socket holding the connection (os_socket.h).
 bool os_api_online(void);
 
 // Outbox: POSTs that must reach the server eventually (X Dex swaps, trades).

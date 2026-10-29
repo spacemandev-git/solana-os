@@ -34,5 +34,8 @@ void os_http_progress(size_t *done, size_t *total);
 // tick from the cloud task's loop) or at once with close (Wi-Fi gone).
 void os_http_tick(void);
 void os_http_close(void);
+// Close the connection now but keep its session ticket, so the next request
+// resumes (~13 KB) instead of a full handshake: an app's socket takes its place.
+void os_http_hangup(void);
 bool os_http_connected(void);               // a connection is open now
 void os_http_stats(uint32_t *requests, uint32_t *connects);
