@@ -58,7 +58,9 @@ idf.py -p /dev/cu.usbserial-110 -b 460800 flash
 This repo is a git submodule (at `firmware/`) of
 [solana-bp26-badges](https://github.com/spacemandev-git/solana-bp26-badges),
 which holds the server, website, beacon firmware and the protocol contracts
-(`docs/MESH.md`, `docs/LUA_API.md`, `server/API.md`). A few tools assume that
+(`docs/MESH.md`, `server/API.md`). The Lua app API (`docs/LUA_API.md`) lives
+here, next to the host that implements it; the site renders it at `/apps/docs`.
+A few tools assume that
 layout: `tools/export_web.ts` / `tools/build_web.sh`, `tools/gen_assets.sh`
 (brand fonts) and the emulator build (writes to `../web/static/emulator`).
 The firmware itself builds standalone.
