@@ -356,6 +356,9 @@ lamps.deposit(address, amount, memo, cb) -- pay into one of the author's escrows
                                         -- spend + transfer + deposit: at most 500 !LAMPs a day per user
 lamps.award(amount, reason, cb)         -- earn: only within the app's daily award cap,
                                         -- cb(true, {awarded=10, balance=1260})
+                                        -- only owners who linked X earn (the cap counts
+                                        -- per X account); otherwise
+                                        -- cb(true, {awarded=0, balance=1250, needsX=true})
 ```
 
 #### Escrows
@@ -886,7 +889,10 @@ function on_key(k)
   led.fill(0x14, 0xF1, 0x95)
   timer.after(80, led.off)
   if taps % 100 == 0 then
-    lamps.award(1, "100 taps", function(ok, r) if ok then ui.toast("+1 !LAMP") end end)
+    lamps.award(1, "100 taps", function(ok, r)
+      if ok and r.awarded > 0 then ui.toast("+1 !LAMP")
+      elseif ok and r.needsX then ui.toast("Link X to earn !LAMPs") end
+    end)
   end
   return true
 end
