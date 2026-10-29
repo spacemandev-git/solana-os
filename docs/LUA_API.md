@@ -949,8 +949,12 @@ end
   console, `print()` included. The badge needs a microSD card and Solana OS 0.5.0 or
   later (it checks `info` first). It replaces an installed app with the same id.
 - **Publish** puts it in the store, once every Lua file compiles with the badge's Lua
-  (see "Compiled by the store"). Each update is a new version; the badge offers it
-  as an update and downloads only the files that changed. An app that uses `http` or
+  (see "Compiled by the store") and an automatic check has read the code: it looks for
+  apps that harm players (taking !LAMPs by deception, asking for passwords, sending
+  data away, hiding what they do), usually within a minute. What it flags waits for an
+  organiser; until then only you see the app, or the store keeps your previous version.
+  Each update is a new version; the badge offers it as an update and downloads only
+  the files that changed. An app that uses `http` or
   `ws` gets answers and sockets only once it's published (the store holds its hosts),
   so publish a first version early.
 
