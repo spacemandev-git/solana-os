@@ -6,6 +6,19 @@ update only to a newer one. Dates are commit dates. The contracts these builds
 implement (`docs/LUA_API.md`, `docs/MESH.md`, `server/API.md`) and the server and
 site changes that came with them live in the parent repository.
 
+## 0.5.3 (2026-10-30)
+
+- **Lua QR codes**: `ui.qr(x, y, size, text)` and `q:text()`, 25 to 218 px, text up to
+  256 bytes, one at a time (its canvas sits on the system heap). Always black on white
+  with a quiet zone, whatever the theme, since not every phone scanner reads
+  light-on-dark codes. Text that doesn't fit at that size is a Lua error.
+- The Lua API docs show a player's phone wallet signing a transaction the badge builds:
+  the app posts the message to its own server, shows a Solana Pay transaction request
+  as a QR code, and finds the sent transaction on chain by its reference.
+- A UI method called on another kind of object (`bar.set(label, 50)`,
+  `label.text(bar, "x")`) is now a Lua error. Before, it wrote one widget's fields into
+  another's memory.
+
 ## 0.5.2 (2026-10-29)
 
 - **Lua Solana RPC** (`rpc`, permission `rpc`): `rpc.call(method, [params], [opts], cb)`

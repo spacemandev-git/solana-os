@@ -15,7 +15,7 @@ typedef struct {
     uint16_t slot, gen;
 } lh_handle_t;
 
-static const char *const s_meta[LH_KIND_COUNT] = {"ui.label", "ui.rect", "ui.bar", "ui.gradient", "ui.list"};
+static const char *const s_meta[LH_KIND_COUNT] = {"ui.label", "ui.rect", "ui.bar", "ui.gradient", "ui.list", "ui.qr"};
 
 static lh_t *s_ui;              // session whose lists call row_cb
 static lua_State *s_row_L;      // thread to read rows with (the caller's)
@@ -175,6 +175,18 @@ static lh_obj_t *check(lua_State *L)
     return o;
 }
 
+// The object behind handle 1 if it is a `kind`: a method taken from one kind
+// and called on another's object (bar.set(label, 5)) must not reach LVGL,
+// which would write a bar's fields into a label.
+static lh_obj_t *check_kind(lua_State *L, lh_kind_t kind, const char *what)
+{
+    lh_obj_t *o = check(L);
+    if (o && o->kind != kind) {
+        luaL_typeerror(L, 1, what);
+    }
+    return o;
+}
+
 static lv_obj_t *base_obj(lv_obj_t *parent, int x, int y, int w, int h)
 {
     lv_obj_t *o = lv_obj_create(parent);
@@ -241,7 +253,7 @@ static int m_remove(lua_State *L)
 
 static int m_text(lua_State *L)
 {
-    lh_obj_t *o = check(L);
+    lh_obj_t *o = check_kind(L, LH_LABEL, "label");
     char t[LH_TEXT_MAX + 1];
     clip_text(t, luaL_checkstring(L, 2));
     if (o) {
@@ -271,7 +283,7 @@ static int m_color(lua_State *L)
 
 static int m_set(lua_State *L)
 {
-    lh_obj_t *o = check(L);
+    lh_obj_t *o = check_kind(L, LH_BAR, "bar");
     int v = luaL_checkinteger(L, 2);
     if (o) {
         lv_bar_set_value(o->obj, v < 0 ? 0 : v > 100 ? 100 : v, LV_ANIM_OFF);
@@ -329,11 +341,7 @@ static void row_cb(int index, ui_row_t *row, void *ctx)
 
 static lh_obj_t *check_list(lua_State *L)
 {
-    lh_obj_t *o = check(L);
-    if (o && o->kind != LH_LIST) {
-        luaL_typeerror(L, 1, "list");
-    }
-    return o;
+    return check_kind(L, LH_LIST, "list");
 }
 
 static int m_items(lua_State *L)
@@ -368,6 +376,28 @@ static int m_select(lua_State *L)
     if (o) {
         s_row_L = L;
         ui_list_select(o->list, i - 1);
+    }
+    return 0;
+}
+
+// ---- QR codes
+
+static const char *qr_text(lua_State *L, int idx, size_t *len)
+{
+    const char *t = luaL_checklstring(L, idx, len);
+    if (*len > LH_QR_TEXT_MAX) {
+        luaL_error(L, "ui.qr: text is %d bytes (at most %d)", (int)*len, LH_QR_TEXT_MAX);
+    }
+    return t;
+}
+
+static int m_qr_text(lua_State *L)
+{
+    lh_obj_t *o = check_kind(L, LH_QR, "QR code");
+    size_t len;
+    const char *t = qr_text(L, 2, &len);
+    if (o && lv_qrcode_update(o->obj, t, len) != LV_RESULT_OK) {
+        luaL_error(L, "ui.qr: %d bytes don't fit a %d px code", (int)len, (int)lv_obj_get_width(o->obj));
     }
     return 0;
 }
@@ -532,6 +562,47 @@ static int l_list(lua_State *L)
     s_row_L = L;
     o->list = ui_list_create_at(box, 0, 0, w, h, row_cb, o);
     ui_list_set_count(o->list, (int)lua_rawlen(L, 5));
+    return 1;
+}
+
+// Always dark modules on white with a quiet zone, whatever the theme: phone
+// wallets' scanners don't all read inverted codes. One at a time, because the
+// canvas (up to 218 x 218 at 1 bit) sits on the system heap, not the script's.
+static int l_qr(lua_State *L)
+{
+    int x = luaL_checkinteger(L, 1), y = luaL_checkinteger(L, 2);
+    int size = luaL_checkinteger(L, 3);
+    size_t len;
+    const char *text = qr_text(L, 4, &len);
+    if (size < LH_QR_MIN || size > OS_ROOT_H) {
+        luaL_error(L, "ui.qr: size must be %d to %d", LH_QR_MIN, OS_ROOT_H);
+    }
+    lh_t *s = ui_session(L);
+    if (!s) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < LH_OBJ_MAX; i++) {
+        n += s->objs[i].obj && s->objs[i].kind == LH_QR;
+    }
+    if (n >= LH_QR_MAX) {
+        luaL_error(L, "ui.qr: %d QR code at a time (change its text, or remove it first)", LH_QR_MAX);
+    }
+    lv_obj_t *q = lv_qrcode_create(s->area);
+    lv_qrcode_set_size(q, size);
+    if (!lv_canvas_get_draw_buf(q)) {
+        lv_obj_delete(q);
+        luaL_error(L, "ui.qr: not enough memory");
+    }
+    lv_qrcode_set_dark_color(q, lv_color_black());
+    lv_qrcode_set_light_color(q, lv_color_white());
+    lv_qrcode_set_quiet_zone(q, true);
+    if (lv_qrcode_update(q, text, len) != LV_RESULT_OK) {
+        lv_obj_delete(q);
+        luaL_error(L, "ui.qr: %d bytes don't fit a %d px code", (int)len, size);
+    }
+    lv_obj_set_pos(q, x, y);
+    new_obj(L, s, LH_QR, q);
     return 1;
 }
 
@@ -759,11 +830,12 @@ void lh_open_ui(lua_State *L)
     static const luaL_Reg gradient[] = {COMMON, {"size", m_size}, {NULL, NULL}};
     static const luaL_Reg list[] = {COMMON, {"items", m_items}, {"selected", m_selected}, {"select", m_select},
                                     {NULL, NULL}};
+    static const luaL_Reg qr[] = {COMMON, {"text", m_qr_text}, {NULL, NULL}};
 #undef COMMON
-    static const luaL_Reg *const methods[LH_KIND_COUNT] = {label, rect, bar, gradient, list};
+    static const luaL_Reg *const methods[LH_KIND_COUNT] = {label, rect, bar, gradient, list, qr};
     static const luaL_Reg fns[] = {
         {"label", l_label}, {"rect", l_rect}, {"bar", l_bar}, {"gradient", l_gradient}, {"list", l_list},
-        {"bg", l_bg}, {"hint", l_hint}, {"toast", l_toast}, {"confirm", l_confirm}, {"input", l_input},
+        {"qr", l_qr}, {"bg", l_bg}, {"hint", l_hint}, {"toast", l_toast}, {"confirm", l_confirm}, {"input", l_input},
         {"clear", l_clear}, {NULL, NULL},
     };
     lh_t *s = lh_get(L);

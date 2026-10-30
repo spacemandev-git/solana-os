@@ -115,7 +115,7 @@ HOME always returns to the launcher. The screen below the status bar is
 |---|---|
 | Memory | 48 KB of Lua heap (the app is stopped with "Out of memory" beyond that). A store app's compiled code runs from flash and mostly isn't in it; a library function takes a few bytes once the app first uses it |
 | CPU | 200 000 VM instructions per callback, coroutines and pattern matching included (else "Script took too long") |
-| UI objects | 64 at a time |
+| UI objects | 64 at a time, one of them a QR code |
 | Text | 200 bytes per label (longer text ends in "..."), 6 KB of label text on screen |
 | Timers | 8 at a time, ≥ 20 ms |
 | Storage | 16 KB per app (`storage.*`) |
@@ -181,6 +181,8 @@ local list = ui.list(x, y, w, h, items, {on_select=function(i, item) end})
 --   items: { "text", ... } or { {title=, sub=, right=}, ... }; the list takes up/down
 --   rows are 36 px; long text ends in "..."
 list:items(newItems)  list:selected() --> index  list:select(i)  list:remove()
+local q = ui.qr(x, y, size, text)       -- a QR code, size x size px (25..218), text ≤ 256 bytes
+q:text("solana:https://...")  q:pos(x, y)  q:show(b)  q:remove()
 ui.hint("SELECT jump   CANCEL exit")    -- key hint pinned to the bottom (16 px)
 ui.toast("Saved")
 ui.confirm("Reset the score?", function(yes) end)      -- modal, SELECT = yes, CANCEL = no
@@ -192,6 +194,14 @@ Colours are theme names: `"text" "dim" "bg" "panel" "border" "purple" "green" "p
 "lpurple" "blue" "aqua" "lime" "yellow" "orange"`. They follow the Dark/Light theme.
 A number `0xRRGGBB` is a fixed colour. While a list, `ui.confirm` or `ui.input` has
 focus it consumes the keys it uses before `on_key` sees them.
+
+`ui.qr` (Solana OS 0.5.3; `nil` on older badges, so check `if ui.qr then`) draws a QR
+code a phone can scan: a link, an address, a [Solana Pay](#build-on-the-badge-sign-on-a-phone)
+request. It's always black on white with a white margin, whatever the theme, because
+not every scanner reads light-on-dark codes. One at a time: change what it shows with
+`q:text()`. Text that doesn't fit at `size` is an error. Shorter text means bigger
+squares that scan from farther away: up to about 130 bytes at 180 px gives 3 px per
+square.
 
 ### `led` (permission `led`)
 
@@ -830,7 +840,8 @@ the rest of the config (`skipPreflight`, `preflightCommitment`, `maxRetries`,
 what the node would do (`err`, `logs`, `unitsConsumed`), which can be over 3.5 KB with
 many logs. The signatures must already be in the transaction: build and sign it where
 the key lives (your server, through `http`, or a wallet), never on the badge (see the
-warning above). A sent transaction isn't confirmed yet: check it with
+warning above). A player's phone wallet can sign what the badge builds: see [Build on
+the badge, sign on a phone](#build-on-the-badge-sign-on-a-phone). A sent transaction isn't confirmed yet: check it with
 `getSignatureStatuses`. A transaction the node refuses fails with the node's error and,
 in brackets, why: `"rpc -32002: Transaction simulation failed (AccountNotFound)"`, or
 `(BlockhashNotFound)`, or `({"InstructionError":[0,{"Custom":1}]})` for a program's error.
@@ -872,6 +883,317 @@ function on_key(k)
   return false
 end
 ```
+
+### Build on the badge, sign on a phone
+
+A player's phone wallet can sign and send a transaction the badge builds. Phantom and
+Solflare scan [Solana Pay](https://github.com/solana-foundation/pay/blob/main/typescript/packages/solana-pay/spec/SPEC.md)
+*transaction requests*: a QR code holding a link to a server (`solana:https://…`),
+which hands the wallet a transaction for its account. The player sees what it does,
+approves it, and the wallet signs and sends it. The transaction itself doesn't fit in
+the QR code, so your server sits in between:
+
+1. The app builds the transaction's message on the badge. It leaves a placeholder
+   where the wallet's address goes (it can't know which wallet will scan) and puts a
+   random *reference* address among the accounts.
+2. It posts the message to your server with `http`. The server keeps it and answers
+   with a `solana:` link.
+3. The app shows the link with `ui.qr`, and the player scans it in their wallet app.
+4. The wallet asks your server for the transaction, naming its account. The server
+   writes that account over the placeholder and a fresh blockhash into the empty slot,
+   and hands the transaction over.
+5. The wallet signs and sends it. Nothing comes back to the badge: it finds the
+   transaction on chain by its reference (`getSignaturesForAddress`).
+
+No key is on the badge or on your server: the only signature is the wallet's.
+
+`lib/solana.lua`, addresses and messages (copy it into your app):
+
+```lua
+-- lib/solana.lua: Solana addresses and transaction messages, built on the badge.
+local M = {}
+local B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+function M.decode(s)                 -- base58 address -> its 32 bytes
+  local b = {}                       -- little-endian while it builds
+  for i = 1, #s do
+    local carry = B58:find(s:sub(i, i), 1, true) - 1
+    for j = 1, #b do
+      carry = carry + b[j] * 58
+      b[j] = carry & 0xFF
+      carry = carry >> 8
+    end
+    while carry > 0 do b[#b + 1] = carry & 0xFF; carry = carry >> 8 end
+  end
+  for i = 1, #s do                   -- each leading "1" is a zero byte
+    if s:sub(i, i) ~= "1" then break end
+    b[#b + 1] = 0
+  end
+  local out = {}
+  for i = #b, 1, -1 do out[#out + 1] = string.char(b[i]) end
+  return table.concat(out)
+end
+
+function M.encode(bytes)             -- 32 bytes -> base58
+  local d = {}
+  for i = 1, #bytes do
+    local carry = bytes:byte(i)
+    for j = 1, #d do
+      carry = carry + d[j] * 256
+      d[j] = carry % 58
+      carry = carry // 58
+    end
+    while carry > 0 do d[#d + 1] = carry % 58; carry = carry // 58 end
+  end
+  local out = {}
+  for i = 1, #bytes do
+    if bytes:byte(i) ~= 0 then break end
+    out[#out + 1] = "1"
+  end
+  for i = #d, 1, -1 do out[#out + 1] = B58:sub(d[i] + 1, d[i] + 1) end
+  return table.concat(out)
+end
+
+function M.hex(s) return ("%02x"):rep(#s):format(s:byte(1, -1)) end
+
+-- 32 random bytes: an address to find a transaction by, never a key pair.
+function M.random_address()
+  local b = {}
+  for i = 1, 32 do b[i] = math.random(0, 255) end
+  return string.char(table.unpack(b))
+end
+
+-- Solana's compact length: 7 bits a byte, low bits first.
+local function len(n)
+  local s = ""
+  repeat
+    local b = n & 0x7F
+    n = n >> 7
+    s = s .. string.char(n > 0 and b | 0x80 or b)
+  until n == 0
+  return s
+end
+
+M.SYSTEM = ("\0"):rep(32)            -- 11111111111111111111111111111111
+M.MEMO = M.decode("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
+M.WALLET = ("\1"):rep(32)            -- stands in for the wallet; the server fills it in
+
+-- Send SOL from the wallet. Extra addresses ride along read-only (a reference).
+function M.transfer(to, lamports, ...)
+  local accounts = {{M.WALLET, w = true}, {to, w = true}}
+  for _, a in ipairs({...}) do accounts[#accounts + 1] = {a} end
+  return {program = M.SYSTEM, accounts = accounts, data = string.pack("<I4i8", 2, lamports)}
+end
+
+function M.memo(text) return {program = M.MEMO, accounts = {}, data = text} end
+
+-- A legacy message whose only signer, and fee payer, is the wallet. Instructions
+-- are {program = address, accounts = {{address, w = true}, {address}}, data = bytes},
+-- with w on the accounts it changes. The blockhash is left for the server.
+function M.message(instructions)
+  local keys, at, w = {M.WALLET}, {[M.WALLET] = 0}, {}
+  local function add(k)
+    if not at[k] then keys[#keys + 1] = k; at[k] = #keys - 1 end
+  end
+  for _, ix in ipairs(instructions) do
+    for _, a in ipairs(ix.accounts) do if a.w then w[a[1]] = true; add(a[1]) end end
+  end
+  local writable = #keys
+  for _, ix in ipairs(instructions) do
+    for _, a in ipairs(ix.accounts) do add(a[1]) end
+    add(ix.program)
+  end
+  local out = {string.char(1, 0, #keys - writable), len(#keys), table.concat(keys), ("\0"):rep(32),
+               len(#instructions)}
+  for _, ix in ipairs(instructions) do
+    local idx = {}
+    for i, a in ipairs(ix.accounts) do idx[i] = string.char(at[a[1]]) end
+    out[#out + 1] = string.char(at[ix.program]) .. len(#idx) .. table.concat(idx) .. len(#ix.data) .. ix.data
+  end
+  return table.concat(out)
+end
+
+return M
+```
+
+`main.lua`:
+
+```lua
+-- Pay 0.01 SOL on devnet from the player's phone wallet. The badge builds the
+-- transaction, your server hands it to the wallet, the wallet signs and sends it.
+-- app.json: "permissions": ["http", "rpc"], "hosts": ["pay.example.com"]
+local sol = require("lib.solana")
+local SERVER = "https://pay.example.com"
+local TO = sol.decode("Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr")
+
+local info = ui.label(198, 16, "Preparing...", {w = 114})
+ui.hint("CANCEL exit")
+if not ui.qr then info:text("Needs Solana OS 0.5.3") return end
+
+local ref = sol.random_address()            -- the payment's reference: the badge finds it by this
+local REF = sol.encode(ref)
+local msg = sol.message({
+  sol.transfer(TO, 10000000, ref),          -- 0.01 SOL; at most 2147483647 lamports (32-bit integers)
+  sol.memo("Paid from badge " .. (badge.id() or "?")),
+})
+local qr, poll
+
+local function stop(text)
+  timer.cancel(poll)
+  poll = nil
+  info:text(text)
+end
+
+local function watch()                      -- every 3 s: has the reference shown up on chain?
+  if sys.millis() > 300000 then             -- the server forgets the transaction after 5 minutes
+    return stop("Timed out. Open the app again to retry.")
+  end
+  rpc.call("getSignaturesForAddress", {REF, {limit = 1, commitment = "confirmed"}},
+    {cluster = "devnet"}, function(ok, r)
+      if not (ok and poll and r[1]) then return end      -- not yet: ask again next round
+      stop(r[1].err and "The payment failed." or "Paid! Scan to see it on the explorer.")
+      qr:text("https://explorer.solana.com/tx/" .. r[1].signature .. "?cluster=devnet")
+    end)
+end
+
+http.post(SERVER .. "/tx", {message = sol.hex(msg)}, function(ok, res)
+  local link = ok and res.status == 200 and (json.decode(res.body) or {}).url
+  if not link then
+    info:text("The server said no: " .. (ok and res.status or res))
+    return
+  end
+  qr = ui.qr(8, 11, 180, link)
+  info:text("Pay 0.01 SOL: scan this in Phantom or Solflare.")
+  poll = timer.every(3000, watch)
+end)
+```
+
+Your server (Bun, `bun add bs58`), at `pay.example.com` in this example:
+
+```ts
+// pay.example.com: keeps each badge's transaction for 5 minutes and hands it to
+// the wallet that scans it, as a Solana Pay transaction request. Bun; bun add bs58.
+import bs58 from 'bs58';
+import { fromBadge } from './badge'; // the check from "What your server receives" (http)
+
+const APP = 'phone-pay';
+const ORIGIN = 'https://pay.example.com';
+const RPC = 'https://api.devnet.solana.com';
+const PROGRAMS = new Set(['11111111111111111111111111111111', 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr']);
+const pending = new Map<string, { message: Uint8Array; badge: string; at: number }>();
+
+/** A legacy message with the wallet as its one signer, calling only PROGRAMS; else null. */
+function read(m: Uint8Array) {
+  let i = 0;
+  const byte = () => { if (i >= m.length) throw 0; return m[i++]; };
+  const len = () => { // compact length
+    let n = 0;
+    for (let s = 0; s < 21; s += 7) { const b = byte(); n |= (b & 0x7f) << s; if (b < 0x80) return n; }
+    throw 0;
+  };
+  const skip = () => { const n = len(); i += n; };
+  try {
+    if (byte() !== 1 || byte() !== 0) return null; // 1 signer, writable (a v0 message starts with 0x80)
+    byte();
+    const keys: Uint8Array[] = [];
+    for (let n = len(); n > 0; n--, i += 32) keys.push(m.subarray(i, i + 32));
+    const blockhash = i;
+    i += 32;
+    for (let n = len(); n > 0; n--) {
+      if (!PROGRAMS.has(bs58.encode(keys[byte()]))) return null;
+      skip(); // account indexes
+      skip(); // data
+    }
+    return i === m.length && keys.every((k) => k.length === 32) ? { keys, blockhash } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function latestBlockhash() {
+  const res = await fetch(RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'confirmed' }] }),
+  });
+  return bs58.decode((await res.json()).result.value.blockhash);
+}
+
+Bun.serve({
+  routes: {
+    // The badge (through the badge server's http): keep its message, answer the link to show.
+    '/tx': {
+      POST: async (req) => {
+        const body = await req.text();
+        const from = await fromBadge(req, body, APP);
+        if (!from) return new Response('who are you?', { status: 403 });
+        let hex = '';
+        try {
+          hex = String(JSON.parse(body).message);
+        } catch {}
+        const message = Uint8Array.from(Buffer.from(hex, 'hex'));
+        if (message.length > 1100 || message.length * 2 !== hex.length || !read(message)) {
+          return Response.json({ error: 'not a transaction this server serves' }, { status: 400 });
+        }
+        for (const [id, p] of pending) if (Date.now() - p.at > 300_000) pending.delete(id);
+        const id = Buffer.from(crypto.getRandomValues(new Uint8Array(9))).toString('base64url');
+        pending.set(id, { message, badge: from.badge, at: Date.now() });
+        return Response.json({ url: `solana:${ORIGIN}/tx/${id}` });
+      },
+    },
+    // The wallet (Solana Pay): first who's asking, then the transaction for its account.
+    '/tx/:id': {
+      GET: (req) =>
+        pending.has(req.params.id)
+          ? Response.json({ label: 'Badge payment', icon: `${ORIGIN}/icon.png` })
+          : Response.json({ error: 'expired' }, { status: 404 }),
+      POST: async (req) => {
+        const p = pending.get(req.params.id);
+        if (!p) return Response.json({ error: 'expired' }, { status: 404 });
+        let wallet: Uint8Array;
+        try {
+          wallet = bs58.decode(String((await req.json()).account));
+        } catch {
+          wallet = new Uint8Array();
+        }
+        const m = p.message.slice(); // a copy: the wallet may ask again
+        const { keys, blockhash } = read(m)!;
+        if (wallet.length !== 32 || keys.some((k) => Buffer.compare(k, wallet) === 0)) {
+          return Response.json({ error: 'this wallet cannot pay this' }, { status: 400 });
+        }
+        keys[0].set(wallet); // the wallet signs and pays the fee
+        m.set(await latestBlockhash(), blockhash);
+        const tx = new Uint8Array(1 + 64 + m.length); // 1 signature, still empty, then the message
+        tx[0] = 1;
+        tx.set(m, 65);
+        return Response.json({ transaction: Buffer.from(tx).toString('base64'), message: `From badge ${p.badge}` });
+      },
+    },
+  },
+});
+```
+
+- **Your server signs nothing, but it answers in your name.** The wallet shows the
+  player your domain, the label and its own simulation of what the transaction does.
+  Anyone can run their own script under your app's id and post any message, so serve
+  only what you mean to: here, `read()` lets through only a legacy message whose one
+  signer is the wallet and which calls only the System and Memo programs. The
+  `X-Badge-*` headers tell you which badge posted it.
+- **Devnet first.** The wallet sends the transaction on the network it's set to, so
+  switch it to devnet before you scan (Phantom: testnet mode in its developer settings;
+  Solflare: its network setting). The app's `rpc` cluster and the server's `RPC` must
+  match it.
+- **Scan in the wallet app**, with its own scan button. A phone's camera app may not
+  open `solana:` links, or may open them in whichever wallet was installed first.
+- **Memory:** while it waits, the example holds about 25 KB of Lua heap. Compiled on
+  the badge (Run on badge) it peaks at 36 KB of the 48 KB; installed from the store it
+  runs from flash and needs less.
+- The message travels as hex, which keeps the Lua short: messages up to about 1,000
+  bytes fit in `http`'s 2 KB. A transfer is limited to 2,147,483,647 lamports, because
+  the badge's integers are 32-bit.
+- **A payment alone needs no server.** A Solana Pay *transfer request* in the QR code,
+  `solana:<recipient>?amount=0.01&reference=<address>&label=Badge`, has the wallet
+  build the transfer itself. Watch for the reference in the same way.
 
 ## Example
 
